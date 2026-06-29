@@ -1,0 +1,88 @@
+/* Zosmed shared design-system layer — design tokens + Tailwind theme mapping
+   (CLAUDE.md §11). The consuming app imports `tailwindcss` itself, then this
+   file, so `@theme`/`@layer` here are processed in the app's Tailwind pipeline. */
+@import './tokens.css';
+
+/* Expose --zz-* design tokens as Tailwind theme tokens so utilities like
+   bg-bg, text-text-2, border-line, text-lime, font-mono are generated.
+   Brand lime adopted from the design master: oklch(0.9 0.2 130). */
+@theme inline {
+  --color-bg: var(--zz-bg);
+  --color-bg-2: var(--zz-bg-2);
+  --color-bg-3: var(--zz-bg-3);
+
+  --color-line: var(--zz-line);
+  --color-line-2: var(--zz-line-2);
+
+  --color-text: var(--zz-text);
+  --color-text-2: var(--zz-text-2);
+  --color-text-3: var(--zz-text-3);
+
+  --color-lime: var(--zz-lime);
+  --color-lime-2: var(--zz-lime-2);
+  --color-warn: var(--zz-warn);
+  --color-pink: var(--zz-pink);
+  --color-blue: var(--zz-blue);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+/* Base app surface. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--zz-bg);
+  color: var(--zz-text);
+  font-family: var(--font-sans);
+}
+* {
+  box-sizing: border-box;
+}
+
+/* Component utilities ported from tokens.css (kept as classes; richer variants
+   live in the <Button>/<Placeholder> components in packages/ui). */
+@layer components {
+  .btn-lime {
+    background: var(--zz-lime);
+    color: #0a0a0a;
+    border: none;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-family: var(--font-sans);
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: transform 0.12s ease;
+  }
+  .btn-lime:hover {
+    transform: translateY(-1px);
+  }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--zz-line-2);
+    color: var(--zz-text);
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+}
+
+/* Live-feed "REAL-TIME" pulse (workflow activity, not IG Live — §9). */
+@keyframes zz-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}

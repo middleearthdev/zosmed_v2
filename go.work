@@ -1,0 +1,11 @@
+go 1.25.0
+
+use (
+	./apps/api
+	./apps/worker
+	./libs/igapi
+	./libs/kits/seller
+	./libs/platform
+	./libs/safety
+	./libs/workflow
+)

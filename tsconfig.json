@@ -1,0 +1,9 @@
+{
+  "//": "Root tsconfig for editor tooling. Each workspace runs its own `tsc --noEmit` for typecheck.",
+  "extends": "./packages/config/tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [],
+  "exclude": ["node_modules", "**/node_modules", "**/.next", "**/dist"]
+}

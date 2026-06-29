@@ -1,0 +1,85 @@
+/* Zosmed design tokens */
+:root {
+  /* Direction A — Dark + Lime */
+  --zz-bg: #0a0a0a;
+  --zz-bg-2: #111110;
+  --zz-bg-3: #17171a;
+  --zz-line: #232326;
+  --zz-line-2: #2e2e33;
+  --zz-text: #f4f4f0;
+  --zz-text-2: #a3a39c;
+  --zz-text-3: #66665f;
+  --zz-lime: oklch(0.9 0.2 130);
+  --zz-lime-2: oklch(0.78 0.2 130);
+  --zz-lime-soft: oklch(0.9 0.2 130 / 0.12);
+  --zz-warn: oklch(0.85 0.16 75);
+  --zz-pink: oklch(0.78 0.2 0);
+  --zz-blue: oklch(0.78 0.16 240);
+
+  /* Direction B — Light editorial */
+  --zb-bg: #f5f4ee;
+  --zb-bg-2: #ffffff;
+  --zb-bg-3: #ebeae3;
+  --zb-line: #d8d6cc;
+  --zb-line-2: #c5c2b3;
+  --zb-text: #14140f;
+  --zb-text-2: #555048;
+  --zb-text-3: #8a857a;
+  --zb-lime: oklch(0.78 0.2 130);
+  --zb-lime-soft: oklch(0.78 0.2 130 / 0.18);
+
+  --font-sans: 'Geist', 'Inter', -apple-system, system-ui, sans-serif;
+  --font-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+  --font-display: 'Geist', 'Inter', sans-serif;
+}
+
+/* Utility classes shared by artboards */
+.mono { font-family: var(--font-mono); font-feature-settings: 'ss01','ss02','tnum'; }
+.tnum { font-variant-numeric: tabular-nums; }
+.tracked { letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* tiny dot connector */
+.zz-dot { width: 6px; height: 6px; border-radius: 999px; background: currentColor; display: inline-block; }
+
+/* lime button */
+.btn-lime {
+  background: var(--zz-lime);
+  color: #0a0a0a;
+  border: none;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: transform .12s ease;
+}
+.btn-lime:hover { transform: translateY(-1px); }
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--zz-line-2);
+  color: var(--zz-text);
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 8px;
+}
+
+/* striped placeholder */
+.zz-placeholder {
+  background-image: repeating-linear-gradient(135deg, transparent 0 10px, rgba(255,255,255,0.04) 10px 11px);
+  border: 1px dashed var(--zz-line-2);
+  color: var(--zz-text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 6px;
+}
+
+/* scrollbar nicities */
+.zz-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.zz-scroll::-webkit-scrollbar-thumb { background: #2a2a2e; border-radius: 4px; }

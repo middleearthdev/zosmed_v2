@@ -1,0 +1,15 @@
+/* App entry stylesheet. Loads Tailwind v4, then the shared design-system globals
+   (design tokens + theme mapping) and wires the Geist fonts via next/font. */
+@import 'tailwindcss';
+@import '@zosmed/ui/styles/globals.css';
+
+/* Include workspace package sources in Tailwind's content scan (node_modules is
+   ignored by default, and workspace deps are symlinked there). */
+@source '../../../packages/ui/src';
+@source '../../../packages/kits/src';
+
+/* Map design font tokens onto the next/font-provided variables (see layout.tsx). */
+:root {
+  --font-sans: var(--font-geist-sans), 'Inter', -apple-system, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), 'JetBrains Mono', ui-monospace, monospace;
+}
