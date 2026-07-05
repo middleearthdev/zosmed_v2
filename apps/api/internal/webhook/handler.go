@@ -3,11 +3,13 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/zosmed/zosmed/apps/api/internal/enqueue"
@@ -16,31 +18,30 @@ import (
 	"github.com/zosmed/zosmed/libs/platform/tasks"
 )
 
-// Handler handles Meta webhook requests for the Zosmed API server.
+// Handler handles Instagram webhook requests for the Zosmed API server
+// (webhooks are subscribed via the Instagram product, CLAUDE.md §4.0/§6.4).
 //
-// Responsibilities (ADR-001 §3.2):
-//   - GET /webhooks/meta  → verify Meta challenge handshake
-//   - POST /webhooks/meta → verify signature → dedupe → filter → enqueue
+// Responsibilities (ADR-001 §3.2; account resolution per ADR-002 §6.1):
+//   - GET /webhooks/meta  → verify webhook challenge handshake
+//   - POST /webhooks/meta → verify signature → resolve account (IGSID) → dedupe → filter → enqueue
 //
-// This handler DOES NOT call the Instagram Graph API, write reservations,
-// or perform any heavy processing. All of that happens in apps/worker (SoC §12a-3).
+// This handler DOES NOT call the Instagram API, write reservations, or
+// perform any heavy processing. All of that happens in apps/worker (SoC §12a-3).
 type Handler struct {
 	queries     *dbgen.Queries
 	enq         *enqueue.Client
 	appSecret   string
 	verifyToken string
-	// accountID is the Postgres UUID of the single connected account (MVP).
-	// See main.go / Assumption note: single-account resolution from IG_ACCOUNT_ID env.
-	accountID pgtype.UUID
-	log       *slog.Logger
+	log         *slog.Logger
 }
 
-// New returns a Handler wired with its dependencies.
+// New returns a Handler wired with its dependencies. Account resolution is
+// no longer a startup-time static value (ADR-002 §6.1) — each webhook entry
+// carries its own IGSID (entry.id), looked up per request via GetAccountByIgUserID.
 func New(
 	queries *dbgen.Queries,
 	enq *enqueue.Client,
 	appSecret, verifyToken string,
-	accountID pgtype.UUID,
 	log *slog.Logger,
 ) *Handler {
 	return &Handler{
@@ -48,7 +49,6 @@ func New(
 		enq:         enq,
 		appSecret:   appSecret,
 		verifyToken: verifyToken,
-		accountID:   accountID,
 		log:         log,
 	}
 }
@@ -58,8 +58,8 @@ func New(
 // On mismatch it responds with 403.
 func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	mode      := q.Get("hub.mode")
-	token     := q.Get("hub.verify_token")
+	mode := q.Get("hub.mode")
+	token := q.Get("hub.verify_token")
 	challenge := q.Get("hub.challenge")
 
 	c, ok := VerifyChallenge(h.verifyToken, mode, token, challenge)
@@ -130,19 +130,40 @@ func (h *Handler) Receive(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]bool{"received": true})
 }
 
-// processComment performs dedupe, catalog filter, and enqueue for one comment event.
-// Returns nil on skip (duplicate / not in catalog) or successful enqueue.
-// Returns a non-nil error only on DB or queue failures worth logging.
+// processComment resolves the account, then performs dedupe, catalog filter,
+// and enqueue for one comment event.
+// Returns nil on skip (unknown account / duplicate / not in catalog) or
+// successful enqueue. Returns a non-nil error only on DB or queue failures
+// worth logging.
 func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 	v := ic.Value
 	if v.ID == "" || v.Media.ID == "" {
 		return nil // skip incomplete events
 	}
 
-	// Step 4: dedupe ledger. ON CONFLICT DO NOTHING → 0 rows = already processed.
+	// Step 4 (ADR-002 §6.1): resolve the connected account from entry.id
+	// (IGSID). Comments belonging to an account Zosmed doesn't know about are
+	// skipped safely — never a 500, since Meta would retry forever otherwise.
+	account, err := h.queries.GetAccountByIgUserID(ctx, ic.EntryID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Genuinely unknown account → skip safely (never a 500).
+			h.log.Debug("webhook: unknown account for entry — skip",
+				slog.String("entry_id", ic.EntryID),
+				slog.String("comment_id", v.ID),
+			)
+			return nil
+		}
+		// A real DB failure (down/transient) must not be silently swallowed as
+		// "unknown account" — surface it so Receive logs it at Error level.
+		return fmt.Errorf("webhook: resolve account: %w", err)
+	}
+	accountID := account.ID
+
+	// Step 5: dedupe ledger. ON CONFLICT DO NOTHING → 0 rows = already processed.
 	rows, err := h.queries.InsertProcessedComment(ctx, dbgen.InsertProcessedCommentParams{
 		IgCommentID:     v.ID,
-		AccountID:       h.accountID,
+		AccountID:       accountID,
 		IgMediaID:       v.Media.ID,
 		CommentText:     v.Text,
 		ContactIgUserID: v.From.ID,
@@ -158,10 +179,10 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 		return nil
 	}
 
-	// Step 5: cheap filter — only enqueue if the media is in an active catalog post.
+	// Step 6: cheap filter — only enqueue if the media is in an active catalog post.
 	_, err = h.queries.GetActiveCatalogPostByMedia(ctx, dbgen.GetActiveCatalogPostByMediaParams{
 		IgMediaID: v.Media.ID,
-		AccountID: h.accountID,
+		AccountID: accountID,
 	})
 	if err != nil {
 		// pgx "no rows" or any other error means media is not registered / not active.
@@ -171,10 +192,11 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 		return nil
 	}
 
-	// Step 6: enqueue for worker (heavy lifting: keep-code detect, reserve, reply).
-	accountIDStr := uuidToString(h.accountID)
+	// Step 7: enqueue for worker (heavy lifting: keep-code detect, reserve, reply).
+	// Only the account UUID goes into the payload — the access token stays in
+	// Postgres; the worker looks it up itself (ADR-002 §6.2, never in Redis).
 	if err := h.enq.EnqueueCommentIngest(ctx, tasks.CommentIngestPayload{
-		AccountID:    accountIDStr,
+		AccountID:    uuidToString(accountID),
 		CommentID:    v.ID,
 		MediaID:      v.Media.ID,
 		FromID:       v.From.ID,

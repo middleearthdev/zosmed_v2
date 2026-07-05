@@ -24,10 +24,16 @@ type MetaChange struct {
 }
 
 // CommentValue is the parsed value for changes where Field == "comments".
-// Spec reference: ADR-001 §3.2 step 2.
+// Spec reference: ADR-001 §3.2 step 2; tolerant id parsing per ADR-002 §6.3 (RESOLVED G10).
 type CommentValue struct {
 	// ID is the Instagram comment ID (ig_comment_id in the DB).
 	ID string `json:"id"`
+	// CommentID is an alternate field name Meta's "examples" documentation
+	// uses for the same value the "webhook reference" docs call `id`
+	// (ADR-002 §6.3/G10 — genuinely ambiguous without a live payload).
+	// ExtractComments falls back to this when ID is empty. Never populated
+	// alongside a non-empty ID in normal operation.
+	CommentID string `json:"comment_id"`
 	// Text is the raw comment text.
 	Text string `json:"text"`
 	// From identifies the commenter.
@@ -75,6 +81,12 @@ func ExtractComments(p MetaPayload) []IngestComment {
 			var cv CommentValue
 			if err := json.Unmarshal(ch.Value, &cv); err != nil {
 				continue // skip malformed; do not fail the whole request
+			}
+			// Tolerant parser (ADR-002 §6.3/G10): some Meta docs use
+			// `comment_id` instead of `id` for the same value. Don't guess
+			// blindly — accept either, preferring `id` when both are set.
+			if cv.ID == "" {
+				cv.ID = cv.CommentID
 			}
 			out = append(out, IngestComment{EntryID: entry.ID, Value: cv})
 		}

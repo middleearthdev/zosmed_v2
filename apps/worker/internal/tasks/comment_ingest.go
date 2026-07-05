@@ -7,30 +7,32 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
 
+	"github.com/zosmed/zosmed/apps/worker/internal/runner"
 	"github.com/zosmed/zosmed/libs/igapi"
 	seller "github.com/zosmed/zosmed/libs/kits/seller"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
 	ptasks "github.com/zosmed/zosmed/libs/platform/tasks"
 	"github.com/zosmed/zosmed/libs/workflow"
-	"github.com/zosmed/zosmed/apps/worker/internal/runner"
 )
 
 // CommentIngestHandler handles the "comment:ingest" task (ptasks.TaskCommentIngest).
 // It is the entry point for the comment-to-order flow inside the worker.
 //
-// Processing steps (ADR-001 §3.3):
+// Processing steps (ADR-001 §3.3; account lookup added by ADR-002 §6.2):
 //  1. Unmarshal CommentIngestPayload.
 //  2. Run DetectKeepCode — skip if no match (not a keep/order comment).
 //  3. Load catalog post — confirm media is registered & active for this account.
-//  4. Load per-account comment-order settings (hold_seconds, reply_template).
-//  5. Build workflow.Event with Raw context, call Engine.Run with igapi.Client
-//     as the Sender (satisfies workflow.Sender structurally).
+//  4. Load the connected account (token + ig_user_id) via GetAccountByID;
+//     skip if not 'connected' rather than send with a dead token.
+//  5. Load per-account comment-order settings (hold_seconds, reply_template).
+//  6. Build workflow.Event with Raw context, call Engine.Run with an
+//     igapi.Client built from the account's own token as the Sender
+//     (satisfies workflow.Sender structurally).
 //
 // Guardrail B: operates on catalog_post.ig_media_id (post/Reel). No IG Live ref.
 // Guardrail F: outbound only via Engine → seller action → rc.Gate → rc.Sender.
@@ -83,20 +85,33 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 		return fmt.Errorf("comment_ingest: get catalog post: %w", err)
 	}
 
-	// Step 4: load per-account settings (non-fatal; defaults apply).
+	// Step 4 (ADR-002 §6.2): load the connected account — token + ig_user_id
+	// come from Postgres per-account, never from env or the task payload.
+	account, err := h.r.DB.GetAccountByID(ctx, accountID)
+	if err != nil {
+		if isNoRows(err) {
+			log.Warn("comment_ingest: unknown account — skip")
+			return nil
+		}
+		return fmt.Errorf("comment_ingest: get account: %w", err)
+	}
+	if account.Status != "connected" {
+		log.Warn("comment_ingest: account not connected — skip",
+			slog.String("status", account.Status),
+		)
+		return nil
+	}
+
+	// Step 5: load per-account settings (non-fatal; defaults apply).
 	holdSeconds := seller.DefaultHoldSeconds
 	settings, settingsErr := h.r.DB.GetCommentOrderSettings(ctx, accountID)
 	if settingsErr == nil {
 		holdSeconds = settings.HoldSeconds
 	}
 
-	// The IG user ID of the business account (sender) comes from env for MVP.
-	// In production this would be fetched from the accounts table per accountID.
-	// Guardrail D: {nama} ONLY from webhook payload (p.FromUsername) — not scraped.
-	igAccountUserID := os.Getenv("IG_ACCOUNT_USER_ID")
-
-	// Step 5: build a source-agnostic workflow.Event and run the engine.
+	// Step 6: build a source-agnostic workflow.Event and run the engine.
 	// Raw carries seller-kit-specific context; engine is neutral to these keys.
+	// Guardrail D: {nama} ONLY from webhook payload (p.FromUsername) — not scraped.
 	event := workflow.Event{
 		Source:       workflow.SourceComment,
 		AccountID:    p.AccountID,
@@ -109,14 +124,15 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 			seller.RawKeyCatalogPostID: seller.UUIDToString(catalogPost.ID),
 			seller.RawKeyKode:          code,
 			seller.RawKeyHoldSeconds:   holdSeconds,
-			seller.RawKeyIgUserID:      igAccountUserID,
+			seller.RawKeyIgUserID:      account.IgUserID,
 			seller.RawKeyCommentAt:     time.Now(), // approximate; used for 7-day window check
 		},
 	}
 
-	// Create igapi.Client for this engine run.
+	// Create igapi.Client for this engine run, built from the account's own
+	// long-lived token (never a static env token — ADR-002 §6.2).
 	// igapi.Client satisfies workflow.Sender structurally (same method signatures).
-	sender := igapi.New(h.r.IGToken)
+	sender := igapi.New(account.AccessToken)
 
 	result, err := h.r.Engine.Run(ctx, event, sender, h.r.Gate)
 	if err != nil {
@@ -140,4 +156,3 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 func isNoRows(err error) bool {
 	return err != nil && strings.HasSuffix(err.Error(), "no rows in result set")
 }
-

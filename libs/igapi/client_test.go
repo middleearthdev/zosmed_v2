@@ -21,19 +21,6 @@ func newTestServer(t *testing.T, status int, body string) *httptest.Server {
 	}))
 }
 
-// newCapturingServer returns a server that captures the last request and responds with 200 + body.
-func newCapturingServer(t *testing.T, body string) (*httptest.Server, *http.Request) {
-	t.Helper()
-	var captured http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		captured = *r
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(body))
-	}))
-	return srv, &captured
-}
-
 // --- ReplyToComment ---
 
 func TestReplyToComment_Success(t *testing.T) {
@@ -90,7 +77,7 @@ func TestSendPrivateReply_RequestShape(t *testing.T) {
 	defer srv.Close()
 
 	client := igapi.NewWithBaseURL("tok", srv.URL)
-	if err := client.SendPrivateReply(context.Background(), "page-ig-user", "comment-42", "Hai kak!"); err != nil {
+	if err := client.SendPrivateReply(context.Background(), "biz-ig-user", "comment-42", "Hai kak!"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -141,7 +128,7 @@ func TestSendDM_RequestShape(t *testing.T) {
 	defer srv.Close()
 
 	client := igapi.NewWithBaseURL("tok", srv.URL)
-	if err := client.SendDM(context.Background(), "page-ig-user", "user-999", "Halo!"); err != nil {
+	if err := client.SendDM(context.Background(), "biz-ig-user", "user-999", "Halo!"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 

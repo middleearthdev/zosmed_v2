@@ -76,12 +76,17 @@ func AllReservationStatusValues() []ReservationStatus {
 }
 
 type Account struct {
-	ID          pgtype.UUID        `json:"id"`
-	IgUserID    string             `json:"ig_user_id"`
-	Handle      string             `json:"handle"`
-	DisplayName string             `json:"display_name"`
-	Status      string             `json:"status"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ID               pgtype.UUID        `json:"id"`
+	IgUserID         string             `json:"ig_user_id"`
+	Handle           string             `json:"handle"`
+	DisplayName      string             `json:"display_name"`
+	Status           string             `json:"status"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	AccessToken      string             `json:"access_token"`
+	TokenType        string             `json:"token_type"`
+	Scopes           []string           `json:"scopes"`
+	TokenExpiresAt   pgtype.Timestamptz `json:"token_expires_at"`
+	TokenRefreshedAt pgtype.Timestamptz `json:"token_refreshed_at"`
 }
 
 type CatalogPost struct {

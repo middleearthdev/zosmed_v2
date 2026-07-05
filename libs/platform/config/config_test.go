@@ -11,8 +11,10 @@ func TestLoad_MissingRequired(t *testing.T) {
 	// No env vars set → Load must return a non-nil error naming a missing var.
 	t.Setenv("DB_URL", "")
 	t.Setenv("REDIS_URL", "")
-	t.Setenv("META_APP_SECRET", "")
-	t.Setenv("META_VERIFY_TOKEN", "")
+	t.Setenv("IG_APP_ID", "")
+	t.Setenv("IG_APP_SECRET", "")
+	t.Setenv("IG_VERIFY_TOKEN", "")
+	t.Setenv("IG_REDIRECT_URI", "")
 	t.Setenv("WA_PHONE", "")
 	t.Setenv("PORT", "")
 
@@ -28,8 +30,10 @@ func TestLoad_MissingRequired(t *testing.T) {
 func TestLoad_AllSet(t *testing.T) {
 	t.Setenv("DB_URL", "postgresql://user:pass@localhost:5432/zosmed")
 	t.Setenv("REDIS_URL", "redis://localhost:6379")
-	t.Setenv("META_APP_SECRET", "test-secret")
-	t.Setenv("META_VERIFY_TOKEN", "test-verify-token")
+	t.Setenv("IG_APP_ID", "123456789")
+	t.Setenv("IG_APP_SECRET", "test-secret")
+	t.Setenv("IG_VERIFY_TOKEN", "test-verify-token")
+	t.Setenv("IG_REDIRECT_URI", "https://app.zosmed.test/connect/instagram/callback")
 	t.Setenv("WA_PHONE", "6281234567890")
 	t.Setenv("PORT", "9090")
 
@@ -43,13 +47,21 @@ func TestLoad_AllSet(t *testing.T) {
 	if c.WAPhone != "6281234567890" {
 		t.Errorf("expected WAPhone=6281234567890, got %s", c.WAPhone)
 	}
+	if c.IGAppID != "123456789" {
+		t.Errorf("expected IGAppID=123456789, got %s", c.IGAppID)
+	}
+	if c.IGRedirectURI != "https://app.zosmed.test/connect/instagram/callback" {
+		t.Errorf("expected IGRedirectURI to round-trip, got %s", c.IGRedirectURI)
+	}
 }
 
 func TestLoad_DefaultPort(t *testing.T) {
 	t.Setenv("DB_URL", "postgresql://localhost/zosmed")
 	t.Setenv("REDIS_URL", "redis://localhost:6379")
-	t.Setenv("META_APP_SECRET", "s")
-	t.Setenv("META_VERIFY_TOKEN", "v")
+	t.Setenv("IG_APP_ID", "1")
+	t.Setenv("IG_APP_SECRET", "s")
+	t.Setenv("IG_VERIFY_TOKEN", "v")
+	t.Setenv("IG_REDIRECT_URI", "https://cb")
 	t.Setenv("WA_PHONE", "628111")
 	t.Setenv("PORT", "") // not set
 
@@ -70,19 +82,23 @@ func TestLoad_MissingSpecific(t *testing.T) {
 	}{
 		{"missing DB_URL", "DB_URL", "DB_URL"},
 		{"missing REDIS_URL", "REDIS_URL", "REDIS_URL"},
-		{"missing META_APP_SECRET", "META_APP_SECRET", "META_APP_SECRET"},
-		{"missing META_VERIFY_TOKEN", "META_VERIFY_TOKEN", "META_VERIFY_TOKEN"},
+		{"missing IG_APP_ID", "IG_APP_ID", "IG_APP_ID"},
+		{"missing IG_APP_SECRET", "IG_APP_SECRET", "IG_APP_SECRET"},
+		{"missing IG_VERIFY_TOKEN", "IG_VERIFY_TOKEN", "IG_VERIFY_TOKEN"},
+		{"missing IG_REDIRECT_URI", "IG_REDIRECT_URI", "IG_REDIRECT_URI"},
 		{"missing WA_PHONE", "WA_PHONE", "WA_PHONE"},
 	}
 
 	// Base env — all set.
 	base := map[string]string{
-		"DB_URL":            "postgresql://localhost/z",
-		"REDIS_URL":         "redis://localhost:6379",
-		"META_APP_SECRET":   "s",
-		"META_VERIFY_TOKEN": "v",
-		"WA_PHONE":          "628111",
-		"PORT":              "",
+		"DB_URL":          "postgresql://localhost/z",
+		"REDIS_URL":       "redis://localhost:6379",
+		"IG_APP_ID":       "1",
+		"IG_APP_SECRET":   "s",
+		"IG_VERIFY_TOKEN": "v",
+		"IG_REDIRECT_URI": "https://cb",
+		"WA_PHONE":        "628111",
+		"PORT":            "",
 	}
 
 	for _, tc := range cases {

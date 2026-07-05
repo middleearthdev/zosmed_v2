@@ -1,16 +1,19 @@
-// Package igapi is a thin, stateless client for the Meta Instagram Graph API.
-// It is transport-only: no Kit logic, no keep-code awareness, no safety enforcement.
-// All outbound calls must pass through the safety layer before reaching this package.
+// Package igapi is a thin, stateless client for the Instagram API with
+// Instagram Login (graph.instagram.com, CLAUDE.md §4.0). It is transport-only:
+// no Kit logic, no keep-code awareness, no safety enforcement, no DB, no
+// apps/* imports. All outbound calls must pass through the safety layer
+// before reaching this package.
 package igapi
 
 import "fmt"
 
-// GraphErrorResponse is the error envelope returned by the Meta Graph API.
+// GraphErrorResponse is the error envelope returned by the Instagram API
+// (RESOLVED G5 — identical shape to the legacy Graph API error envelope).
 type GraphErrorResponse struct {
 	Error GraphError `json:"error"`
 }
 
-// GraphError carries the structured error detail from the Graph API.
+// GraphError carries the structured error detail from the Instagram API.
 type GraphError struct {
 	Message   string `json:"message"`
 	Type      string `json:"type"`

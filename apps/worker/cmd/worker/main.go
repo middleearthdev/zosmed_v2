@@ -13,16 +13,22 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/zosmed/zosmed/apps/worker/internal/runner"
+	"github.com/zosmed/zosmed/apps/worker/internal/tasks"
+	"github.com/zosmed/zosmed/libs/igapi"
 	"github.com/zosmed/zosmed/libs/platform/config"
 	"github.com/zosmed/zosmed/libs/platform/db"
 	platformlog "github.com/zosmed/zosmed/libs/platform/log"
 	"github.com/zosmed/zosmed/libs/platform/queue"
 	ptasks "github.com/zosmed/zosmed/libs/platform/tasks"
-	"github.com/zosmed/zosmed/apps/worker/internal/runner"
-	"github.com/zosmed/zosmed/apps/worker/internal/tasks"
 )
 
 const workerConcurrency = 10
+
+// tokenRefreshCron runs the token refresh sweep every 6 hours (ADR-002 §5).
+// Long-lived tokens live ~60 days, so this cadence comfortably catches every
+// account before its 7-day refresh-lead window (see tasks.refreshLeadWindow).
+const tokenRefreshCron = "0 */6 * * *"
 
 func main() {
 	log := platformlog.Logger
@@ -33,13 +39,6 @@ func main() {
 	if err != nil {
 		log.Error("worker: config load failed", slog.String("error", err.Error()))
 		os.Exit(1)
-	}
-
-	// Extra env vars for the worker (not in shared Config to avoid touching libs/platform).
-	igToken := os.Getenv("IG_ACCESS_TOKEN")    // IG page access token for igapi.Client
-	igAccountUserID := os.Getenv("IG_ACCOUNT_USER_ID") // IG user ID of the business account
-	if igToken == "" || igAccountUserID == "" {
-		log.Warn("worker: IG_ACCESS_TOKEN or IG_ACCOUNT_USER_ID not set; igapi calls will fail")
 	}
 
 	// ── Postgres ─────────────────────────────────────────────────────────────
@@ -68,15 +67,39 @@ func main() {
 	defer asynqClient.Close()
 
 	// ── Wire runner (engine + safety gate + seller kit) ──────────────────────
-	r := runner.New(pool, rdb, asynqClient, cfg.WAPhone, igToken)
+	// Per-account IG tokens are looked up from Postgres inside task handlers
+	// (ADR-002 §6.2) — the Runner itself no longer holds a static IG token.
+	r := runner.New(pool, rdb, asynqClient, cfg.WAPhone)
+
+	// ── Instagram Login OAuth (for the token refresh sweep, ADR-002 §5) ──────
+	oauthCfg := igapi.OAuthConfig{
+		AppID:       cfg.IGAppID,
+		AppSecret:   cfg.IGAppSecret,
+		RedirectURI: cfg.IGRedirectURI,
+	}
 
 	// ── Register task handlers ────────────────────────────────────────────────
 	ingestHandler := tasks.NewCommentIngestHandler(r, log)
 	expireHandler := tasks.NewReservationExpireHandler(r, log)
+	tokenRefreshHandler := tasks.NewTokenRefreshHandler(r.DB, oauthCfg, log)
 
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(ptasks.TaskCommentIngest, ingestHandler.ProcessTask)
 	mux.HandleFunc(ptasks.TaskReservationExpire, expireHandler.ProcessTask)
+	mux.HandleFunc(ptasks.TaskTokenRefreshSweep, tokenRefreshHandler.ProcessTask)
+
+	// ── asynq scheduler (periodic tasks; ADR-002 §5 — first scheduler in the
+	// worker, future periodic tasks e.g. reservation reconcile register onto
+	// this same instance rather than creating a second one) ─────────────────
+	scheduler, err := queue.NewScheduler(cfg.RedisURL)
+	if err != nil {
+		log.Error("worker: asynq scheduler failed", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	if _, err := scheduler.Register(tokenRefreshCron, asynq.NewTask(ptasks.TaskTokenRefreshSweep, nil)); err != nil {
+		log.Error("worker: register token refresh sweep failed", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 
 	// ── asynq server ──────────────────────────────────────────────────────────
 	srv, err := queue.NewServer(cfg.RedisURL, workerConcurrency)
@@ -92,7 +115,15 @@ func main() {
 	go func() {
 		<-quit
 		log.Info("worker: shutdown signal received")
+		scheduler.Shutdown()
 		srv.Shutdown()
+	}()
+
+	go func() {
+		log.Info("worker: scheduler starting", slog.String("token_refresh_cron", tokenRefreshCron))
+		if err := scheduler.Run(); err != nil {
+			log.Error("worker: scheduler error", slog.String("error", err.Error()))
+		}
 	}()
 
 	log.Info("worker: starting", slog.Int("concurrency", workerConcurrency))

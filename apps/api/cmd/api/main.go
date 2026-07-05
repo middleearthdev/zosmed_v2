@@ -13,13 +13,14 @@ import (
 	"time"
 
 	"github.com/zosmed/zosmed/apps/api/internal/commentorder"
+	"github.com/zosmed/zosmed/apps/api/internal/connect"
 	"github.com/zosmed/zosmed/apps/api/internal/enqueue"
 	"github.com/zosmed/zosmed/apps/api/internal/httpx"
 	"github.com/zosmed/zosmed/apps/api/internal/webhook"
+	"github.com/zosmed/zosmed/libs/igapi"
 	"github.com/zosmed/zosmed/libs/platform/config"
 	"github.com/zosmed/zosmed/libs/platform/db"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
-	seller "github.com/zosmed/zosmed/libs/kits/seller"
 	platformlog "github.com/zosmed/zosmed/libs/platform/log"
 	"github.com/zosmed/zosmed/libs/platform/queue"
 )
@@ -33,23 +34,6 @@ func main() {
 	if err != nil {
 		log.Error("api: config load failed", slog.String("error", err.Error()))
 		os.Exit(1)
-	}
-
-	// ── Account resolution (MVP single-account) ─────────────────────────────────
-	// Assumption: one business account per deployment in MVP phase.
-	// IG_ACCOUNT_ID must be the Postgres UUID from the account table.
-	// The webhook entry.id field (IG user ID string) is NOT the same as this UUID.
-	// Production: replace with a DB lookup from the account table using the IG user ID
-	// extracted from the webhook entry.id.
-	accountIDStr := os.Getenv("IG_ACCOUNT_ID")
-	accountID, err := seller.ParseUUID(accountIDStr)
-	if err != nil {
-		// Non-fatal at startup: the server still handles REST endpoints.
-		// Webhooks will fail the catalog lookup and log a debug message.
-		log.Warn("api: IG_ACCOUNT_ID missing or invalid — webhook ingest disabled",
-			slog.String("raw", accountIDStr),
-			slog.String("error", err.Error()),
-		)
 	}
 
 	// ── Postgres ─────────────────────────────────────────────────────────────────
@@ -72,14 +56,27 @@ func main() {
 
 	enqClient := enqueue.New(asynqClient)
 
+	// ── Instagram Login OAuth (ADR-002 §3) ───────────────────────────────────────
+	oauthCfg := igapi.OAuthConfig{
+		AppID:       cfg.IGAppID,
+		AppSecret:   cfg.IGAppSecret,
+		RedirectURI: cfg.IGRedirectURI,
+	}
+	connectStore := connect.NewStore(queries)
+	connectHandler := connect.New(oauthCfg, cfg.IGAppSecret, connectStore, log)
+
 	// ── Build handlers ────────────────────────────────────────────────────────────
-	whHandler := webhook.New(queries, enqClient, cfg.MetaAppSecret, cfg.MetaVerifyToken, accountID, log)
+	// Account resolution is per-webhook-entry now (entry.id → GetAccountByIgUserID,
+	// ADR-002 §6.1) — no more single-account env var.
+	whHandler := webhook.New(queries, enqClient, cfg.IGAppSecret, cfg.IGVerifyToken, log)
 	coHandler := commentorder.NewHandler(queries)
 
 	// ── Wire router ───────────────────────────────────────────────────────────────
 	router := httpx.NewRouter(httpx.Routes{
 		WebhookChallenge: whHandler.Challenge,
 		WebhookReceive:   whHandler.Receive,
+		ConnectStart:     connectHandler.Start,
+		ConnectCallback:  connectHandler.Callback,
 		GetCommentOrder:  coHandler.GetCommentOrder,
 		GetReservation:   coHandler.GetReservation,
 		CloseReservation: coHandler.CloseReservation,

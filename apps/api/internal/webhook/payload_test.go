@@ -19,9 +19,9 @@ func commentValueJSON(t *testing.T, cv CommentValue) json.RawMessage {
 
 func TestExtractComments_SingleComment(t *testing.T) {
 	cv := CommentValue{
-		ID:   "17858893269000001",
-		Text: "keep C1",
-		From: CommentFrom{ID: "111222333", Username: "buyer_satu"},
+		ID:    "17858893269000001",
+		Text:  "keep C1",
+		From:  CommentFrom{ID: "111222333", Username: "buyer_satu"},
 		Media: CommentMedia{ID: "17896129340000001"},
 	}
 
@@ -159,5 +159,42 @@ func TestExtractComments_EmptyPayload(t *testing.T) {
 	comments := ExtractComments(MetaPayload{})
 	if len(comments) != 0 {
 		t.Fatalf("expected nil/empty slice for empty payload, got %v", comments)
+	}
+}
+
+// ── Tolerant id/comment_id parsing (ADR-002 §6.3, RESOLVED G10) ────────────────
+
+func TestExtractComments_FallsBackToCommentIDWhenIDEmpty(t *testing.T) {
+	// Some Meta docs use `comment_id` instead of `id` for the same value.
+	raw := json.RawMessage(`{"comment_id":"17858893269000099","text":"C1","from":{"id":"u9","username":"buyer_nine"},"media":{"id":"m9"}}`)
+
+	payload := MetaPayload{
+		Object: "instagram",
+		Entry:  []MetaEntry{{ID: "e1", Changes: []MetaChange{{Field: "comments", Value: raw}}}},
+	}
+
+	comments := ExtractComments(payload)
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
+	}
+	if comments[0].Value.ID != "17858893269000099" {
+		t.Errorf("expected ID to fall back to comment_id, got %q", comments[0].Value.ID)
+	}
+}
+
+func TestExtractComments_PrefersIDWhenBothPresent(t *testing.T) {
+	raw := json.RawMessage(`{"id":"id-wins","comment_id":"comment-id-loses","text":"keep","from":{"id":"u1"},"media":{"id":"m1"}}`)
+
+	payload := MetaPayload{
+		Object: "instagram",
+		Entry:  []MetaEntry{{ID: "e1", Changes: []MetaChange{{Field: "comments", Value: raw}}}},
+	}
+
+	comments := ExtractComments(payload)
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
+	}
+	if comments[0].Value.ID != "id-wins" {
+		t.Errorf("expected id field to take priority, got %q", comments[0].Value.ID)
 	}
 }

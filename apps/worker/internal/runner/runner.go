@@ -34,14 +34,15 @@ var CommentToOrderWorkflow = workflow.WorkflowDef{
 }
 
 // Runner holds the wired workflow engine and shared services.
-// The igapi.Client (Sender) is created per-call in task handlers using IGToken,
-// keeping the Runner itself stateless with respect to the IG API.
+// The igapi.Client (Sender) is created per-run in task handlers, built from
+// the per-account token looked up via DB.GetAccountByID (ADR-002 §6.2) —
+// there is no single static token anymore, so the Runner itself stays
+// stateless with respect to IG credentials.
 type Runner struct {
-	Engine  *workflow.Engine
-	DB      *dbgen.Queries             // exposed for task handlers to load catalog/account context
-	Gate    workflow.Gater             // safety.Gate adapted to workflow.Gater (one-door)
-	Svc     *seller.ReservationService // exposed for reservation:expire handler
-	IGToken string                     // IG page access token (MVP: single account from env)
+	Engine *workflow.Engine
+	DB     *dbgen.Queries             // exposed for task handlers to load catalog/account context
+	Gate   workflow.Gater             // safety.Gate adapted to workflow.Gater (one-door)
+	Svc    *seller.ReservationService // exposed for reservation:expire handler
 }
 
 // New creates a fully wired Runner.
@@ -50,13 +51,11 @@ type Runner struct {
 //   - rdb:         Redis client (for safety.Gate quota + dedupe counters)
 //   - asynqClient: asynq client (for enqueueing reservation:expire tasks)
 //   - waPhone:     WhatsApp phone number E.164 without '+' (e.g. "6281234567890")
-//   - igToken:     IG page access token for the business account
 func New(
 	pool *pgxpool.Pool,
 	rdb redis.UniversalClient,
 	asynqClient *asynq.Client,
 	waPhone string,
-	igToken string,
 ) *Runner {
 	db := dbgen.New(pool)
 
@@ -94,11 +93,10 @@ func New(
 	adapted := &gateAdapter{g: safetyGate}
 
 	return &Runner{
-		Engine:  eng,
-		DB:      db,
-		Gate:    adapted,
-		Svc:     svc,
-		IGToken: igToken,
+		Engine: eng,
+		DB:     db,
+		Gate:   adapted,
+		Svc:    svc,
 	}
 }
 

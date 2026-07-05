@@ -15,6 +15,12 @@ type Routes struct {
 	WebhookChallenge http.HandlerFunc
 	WebhookReceive   http.HandlerFunc
 
+	// Instagram Login connect flow (ADR-002 §3.3). Both are public: Start
+	// only redirects (no secrets exposed), and Callback is called back by
+	// Instagram itself; the signed state param is the CSRF protection for MVP.
+	ConnectStart    http.HandlerFunc
+	ConnectCallback http.HandlerFunc
+
 	// Comment-to-Order screen
 	GetCommentOrder http.HandlerFunc
 
@@ -41,6 +47,10 @@ func NewRouter(routes Routes) http.Handler {
 	// Webhook endpoints: called by Meta, must not have auth middleware.
 	r.Get("/webhooks/meta", routes.WebhookChallenge)
 	r.Post("/webhooks/meta", routes.WebhookReceive)
+
+	// Instagram Login connect flow: public, protected by signed state (ADR-002 §3.3).
+	r.Get("/connect/instagram", routes.ConnectStart)
+	r.Get("/connect/instagram/callback", routes.ConnectCallback)
 
 	// API v1 group: auth stub for MVP.
 	r.Group(func(r chi.Router) {

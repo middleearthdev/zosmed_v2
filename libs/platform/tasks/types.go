@@ -13,6 +13,12 @@ const (
 	// when a reservation is created. The worker transitions the reservation
 	// to expired-released if it is still in a non-terminal state.
 	TaskReservationExpire = "reservation:expire"
+
+	// TaskTokenRefreshSweep is enqueued periodically (asynq Scheduler, ADR-002
+	// §5) to refresh IG-user long-lived tokens that are approaching expiry.
+	// Carries no payload — the handler reads ListAccountsDueForRefresh fresh
+	// from Postgres on every run.
+	TaskTokenRefreshSweep = "token:refresh-sweep"
 )
 
 // CommentIngestPayload is the payload for TaskCommentIngest.

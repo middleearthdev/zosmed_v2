@@ -1,12 +1,20 @@
 import { Avatar, Button, I, Meter, Pill } from '@zosmed/ui';
-import { getSettings } from '@/lib/mock/api';
+import { getAccount, getInstagramConnectUrl, getSettings } from '@/lib/mock/api';
 import { STATUS_TONE } from '@/lib/mock/system';
 import { PageHeader } from '../_components/PageHeader';
+import { ConnectedBanner } from '@/app/_components/ConnectedBanner';
+import { InstagramConnectStatus } from '@/app/_components/InstagramConnectStatus';
 
 const ACC_GRID = 'grid-cols-[40px_1.4fr_0.8fr_0.8fr_1fr_80px]';
 
-export default async function SettingsPage() {
-  const data = await getSettings();
+interface SettingsPageProps {
+  searchParams: Promise<{ connected?: string }>;
+}
+
+export default async function SettingsPage({ searchParams }: SettingsPageProps) {
+  const [data, account, params] = await Promise.all([getSettings(), getAccount(), searchParams]);
+  const connectUrl = getInstagramConnectUrl();
+  const justConnected = params.connected === '1';
 
   return (
     <>
@@ -33,8 +41,18 @@ export default async function SettingsPage() {
 
         {/* Content */}
         <div className="zz-scroll flex-1 overflow-y-auto p-8">
-          <h1 className="m-0 mb-1.5 text-3xl font-medium tracking-tight">Connected accounts</h1>
-          <p className="text-text-2 m-0 mb-7 max-w-[600px] text-sm">
+          {justConnected ? <ConnectedBanner /> : null}
+
+          <h1 className="m-0 mb-1.5 text-3xl font-medium tracking-tight">Instagram Business Login</h1>
+          <p className="text-text-2 m-0 mb-3.5 max-w-[600px] text-sm">
+            Login OAuth resmi via Instagram (bukan Facebook Page) — satu akun Business/Creator per workspace.
+          </p>
+          <div className="bg-bg-2 border-line mb-7 rounded-xl border p-4">
+            <InstagramConnectStatus account={account} connectUrl={connectUrl} />
+          </div>
+
+          <h2 className="mb-1.5 mt-8 text-lg font-medium">Connected accounts</h2>
+          <p className="text-text-2 m-0 mb-3.5 max-w-[600px] text-sm">
             Hubungkan akun Instagram untuk diatur otomatis. Workspace Pro support hingga 5 akun · Enterprise unlimited.
           </p>
 

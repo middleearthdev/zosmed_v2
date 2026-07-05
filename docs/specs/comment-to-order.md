@@ -417,7 +417,9 @@ Slice happy-path lengkap, build+test hijau, dan §4b compliance bersih (tidak me
 ### MAJOR-1 — Private reply metered ke DM cap (SELESAI ✅)
 Private reply dikirim via `POST /{ig-id}/messages` (sebuah DM), jadi harus dihitung ke cap DM (§4c: 200/jam overflow→Queue, 1000/hari), bukan cap comment-reply (750/jam). Diperbaiki di `libs/safety/quota.go` + `gate.go`: `KindPrivateReply` kini meter cap DM; ditambah `KindCommentReply` untuk public reply-comment (§7) yang memakai cap 750/30. Tes `compliance_test.go`/`gate_test.go` diselaraskan.
 
-### MAJOR-0 — Re-review & migrasi ke Instagram Login (`graph.instagram.com`) ⚠️ PRIORITAS
+### MAJOR-0 — Re-review & migrasi ke Instagram Login (`graph.instagram.com`) (SELESAI ✅)
+**Diselesaikan 2026-07-05 via ADR-002 (`docs/specs/migrate-instagram-login.md`), AC-1..AC-14 hijau.** Base URL → `graph.instagram.com/v25.0`, OAuth/connect flow + token store (migrasi `00007_account_tokens.sql`) dibangun, resolusi akun berbasis IGSID, refresh scheduler, env `META_*`→`IG_*`. Diverifikasi ig-platform-guardian (§11-R) + code-reviewer (fix C1 kebocoran token log, M1 error DB webhook). Detail keputusan asli di bawah (arsip):
+
 Keputusan platform (CLAUDE.md §4.0): integrasi IG **wajib** via **Instagram API with Instagram Login** di host **`graph.instagram.com`**, **bukan** `graph.facebook.com`/Facebook Login. Slice ini dibangun sebelum keputusan itu ditegaskan, jadi **review ulang & sesuaikan** seluruh jalur IG:
 - **`libs/igapi`**: base URL saat ini `https://graph.facebook.com/v21.0` (`client.go:13`) → ganti ke `https://graph.instagram.com` (versi sesuai dok); verifikasi path endpoint (`POST /{ig-id}/messages` private reply, `POST /{ig-comment-id}/replies`, `GET /me`) sesuai dok Instagram Login; header `Authorization: Bearer <IG-user-token>`.
 - **OAuth/connect flow** (belum dibangun di slice ini): authorization `instagram.com/oauth/authorize` (scope `instagram_business_*`), exchange `api.instagram.com/oauth/access_token` → long-lived di `graph.instagram.com/access_token`, refresh `graph.instagram.com/refresh_access_token`. Simpan **IG-user-scoped long-lived token** (bukan Page token) di tabel `account`.

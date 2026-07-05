@@ -55,6 +55,16 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 const DEFAULT_ACCOUNT_ID = process.env.NEXT_PUBLIC_DEFAULT_ACCOUNT_ID ?? '';
 const DEFAULT_POST_ID = process.env.NEXT_PUBLIC_DEFAULT_POST_ID ?? '';
 
+/**
+ * URL redirect OAuth "Hubungkan Instagram" (`GET /connect/instagram`, backend
+ * `apps/api` — migrate-instagram-login.md §3.1/§3.3). Satu sumber dipakai
+ * Settings & Onboarding (§12a-1 DRY); tinggal navigasi browser ke sini, backend
+ * yang menangani redirect ke `instagram.com/oauth/authorize`.
+ */
+export function getInstagramConnectUrl(): string {
+  return new URL('/connect/instagram', API_BASE).toString();
+}
+
 // ── Generic envelope (selaras backend Go respond.go) ─────────────────────────
 
 interface ApiEnvelope<T> {

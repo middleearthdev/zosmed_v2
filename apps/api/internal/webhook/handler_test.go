@@ -38,7 +38,6 @@ func makeHandler(t *testing.T, appSecret, verifyToken string, queries *dbgen.Que
 		enq:         nil,
 		appSecret:   appSecret,
 		verifyToken: verifyToken,
-		accountID:   pgtype.UUID{Valid: true}, // 00000000-... in tests
 		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
@@ -65,29 +64,62 @@ func marshalPayload(t *testing.T, p MetaPayload) []byte {
 
 // ── fakeDedupeDTBX ───────────────────────────────────────────────────────────
 
-// fakeDedupeDTBX is a minimal dbgen.DBTX stub for testing the dedupe path
-// (processComment step 4: InsertProcessedComment → Exec).
+// fakeDedupeDTBX is a minimal dbgen.DBTX stub for testing the
+// account-resolution (ADR-002 §6.1) + dedupe path:
 //
-// Only Exec is exercised on the dedupe path; calling Query or QueryRow would
-// mean a different code path was taken, so both panic to surface accidental
-// use immediately.
+//	GetAccountByIgUserID (QueryRow) → InsertProcessedComment (Exec)
+//
+// accountFound controls the QueryRow leg: true → scans a fixed "connected"
+// account row so the flow proceeds to Exec; false → pgx.ErrNoRows, modelling
+// an unknown IGSID (AC-9: must skip safely, never 500).
+//
+// Only Exec and the account-lookup QueryRow are exercised on the paths under
+// test below; Query is never reached, so it panics to surface accidental use.
 type fakeDedupeDTBX struct {
-	execTag pgconn.CommandTag
-	execErr error
+	execTag      pgconn.CommandTag
+	execErr      error
+	accountFound bool
+	// accountScanErr, when non-nil, is returned by the GetAccountByIgUserID
+	// QueryRow scan to model a real DB failure (not ErrNoRows) — see M1.
+	accountScanErr error
 }
 
 func (f *fakeDedupeDTBX) Exec(_ context.Context, _ string, _ ...interface{}) (pgconn.CommandTag, error) {
 	return f.execTag, f.execErr
 }
 
-// Query panics — never reached on the dedupe/error paths under test.
+// Query panics — never reached on the paths under test.
 func (f *fakeDedupeDTBX) Query(_ context.Context, _ string, _ ...interface{}) (pgx.Rows, error) {
 	panic("fakeDedupeDTBX.Query: unexpected call — wrong code path in handler test")
 }
 
-// QueryRow panics — never reached when Exec returns 0 rows or an error.
+// QueryRow backs GetAccountByIgUserID. It returns a fakeAccountRow whose
+// Scan behaviour is controlled by accountFound.
 func (f *fakeDedupeDTBX) QueryRow(_ context.Context, _ string, _ ...interface{}) pgx.Row {
-	panic("fakeDedupeDTBX.QueryRow: unexpected call — wrong code path in handler test")
+	return &fakeAccountRow{found: f.accountFound, scanErr: f.accountScanErr}
+}
+
+// fakeAccountRow implements pgx.Row for the GetAccountByIgUserID scan. It
+// only needs to satisfy dest[0] (Account.ID, a pgtype.UUID) — the tests below
+// never inspect the resolved account's other fields.
+type fakeAccountRow struct {
+	found   bool
+	scanErr error
+}
+
+func (r *fakeAccountRow) Scan(dest ...interface{}) error {
+	if r.scanErr != nil {
+		return r.scanErr
+	}
+	if !r.found {
+		return pgx.ErrNoRows
+	}
+	if len(dest) > 0 {
+		if idPtr, ok := dest[0].(*pgtype.UUID); ok {
+			*idPtr = pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}
+		}
+	}
+	return nil
 }
 
 // ── Challenge endpoint ────────────────────────────────────────────────────────
@@ -308,8 +340,9 @@ func TestReceive_CommentEmptyID_EarlyReturn(t *testing.T) {
 // nil-dereference and panic, failing the test immediately.
 func TestReceive_DuplicateComment_SkipsEnqueue(t *testing.T) {
 	fakeDB := &fakeDedupeDTBX{
-		execTag: pgconn.NewCommandTag("INSERT 0 0"), // 0 rows → duplicate
-		execErr: nil,
+		execTag:      pgconn.NewCommandTag("INSERT 0 0"), // 0 rows → duplicate
+		execErr:      nil,
+		accountFound: true, // account resolves so we reach the dedupe Exec
 	}
 	queries := dbgen.New(fakeDB)
 	h := makeHandler(t, "secret", "tok", queries)
@@ -340,7 +373,8 @@ func TestReceive_DuplicateComment_SkipsEnqueue(t *testing.T) {
 // (preventing Meta from retrying and causing duplicate enqueues).
 func TestReceive_DBError_StillReturns200(t *testing.T) {
 	fakeDB := &fakeDedupeDTBX{
-		execErr: errors.New("postgres: connection reset"),
+		execErr:      errors.New("postgres: connection reset"),
+		accountFound: true, // account resolves so we reach the failing Exec
 	}
 	queries := dbgen.New(fakeDB)
 	h := makeHandler(t, "secret", "tok", queries)
@@ -362,6 +396,67 @@ func TestReceive_DBError_StillReturns200(t *testing.T) {
 	// Per handler docs: never return non-200 to Meta.
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200 even on DB error, got %d", w.Code)
+	}
+}
+
+// TestReceive_UnknownAccount_SkipsSafely verifies ADR-002 AC-9: a comment
+// whose entry.id (IGSID) does not resolve to a known account is skipped
+// safely — still 200, and no dedupe/enqueue call is attempted.
+//
+// Proof: accountFound=false makes GetAccountByIgUserID return pgx.ErrNoRows;
+// h.enq is nil, so if processComment somehow proceeded to EnqueueCommentIngest
+// it would nil-dereference and panic, failing the test immediately.
+func TestReceive_UnknownAccount_SkipsSafely(t *testing.T) {
+	fakeDB := &fakeDedupeDTBX{accountFound: false}
+	queries := dbgen.New(fakeDB)
+	h := makeHandler(t, "secret", "tok", queries)
+
+	cv := CommentValue{
+		ID:    "cmt-unknown-acct-001",
+		Text:  "keep C1",
+		From:  CommentFrom{ID: "u3", Username: "buyer3"},
+		Media: CommentMedia{ID: "media-003"},
+	}
+	payload := MetaPayload{
+		Object: "instagram",
+		Entry:  []MetaEntry{{ID: "unknown-igsid", Changes: []MetaChange{{Field: "comments", Value: commentValueJSON(t, cv)}}}},
+	}
+	body := marshalPayload(t, payload)
+
+	w := postSigned(t, h, body)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for unknown account, got %d", w.Code)
+	}
+	// Test not panicking proves the dedupe/enqueue steps were never reached.
+}
+
+// TestProcessComment_RealDBError_NotSwallowed guards M1: a non-ErrNoRows
+// failure from GetAccountByIgUserID (DB down/transient) must surface as an
+// error — NOT be silently treated as "unknown account" and skipped. Otherwise
+// comments are dropped without observability (Meta still gets 200, no retry).
+func TestProcessComment_RealDBError_NotSwallowed(t *testing.T) {
+	dbErr := errors.New("connection refused")
+	fakeDB := &fakeDedupeDTBX{accountScanErr: dbErr}
+	queries := dbgen.New(fakeDB)
+	h := makeHandler(t, "secret", "tok", queries)
+
+	ic := IngestComment{
+		EntryID: "some-igsid",
+		Value: CommentValue{
+			ID:    "cmt-db-err-001",
+			Text:  "keep C1",
+			From:  CommentFrom{ID: "u9", Username: "buyer9"},
+			Media: CommentMedia{ID: "media-009"},
+		},
+	}
+
+	err := h.processComment(context.Background(), ic)
+	if err == nil {
+		t.Fatal("expected error on real DB failure, got nil (M1: error was swallowed as unknown-account)")
+	}
+	if !errors.Is(err, dbErr) {
+		t.Errorf("expected wrapped DB error, got %v", err)
 	}
 }
 

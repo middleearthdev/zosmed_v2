@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 import { ChatBubble, I, Logo, Pill, Placeholder } from '@zosmed/ui';
+import { getAccount, getInstagramConnectUrl } from '@/lib/mock/api';
+import { ACCOUNT_STATUS_LABEL, ACCOUNT_STATUS_TONE } from '@/lib/account-status';
 
 const STEPS = ['Connect IG', 'Pilih Kit', 'Train AI', 'Go live'];
 
@@ -9,7 +11,11 @@ const SEGMENTS = [
   { t: 'Jasa', k: 'Booking Kit', d: 'komentar → janji temu via WA / kalender', accent: 'var(--zz-warn)', iconKey: 'calendar' as const, live: false },
 ];
 
-export default function OnboardingPage() {
+export default async function OnboardingPage() {
+  const account = await getAccount();
+  const connectUrl = getInstagramConnectUrl();
+  const connected = account.status === 'connected';
+
   return (
     <div className="bg-bg text-text min-h-screen p-6">
       {/* Top bar: logo + stepper + skip */}
@@ -36,19 +42,19 @@ export default function OnboardingPage() {
 
       <div className="grid grid-cols-2 gap-3.5">
         {/* Step 1 */}
-        <StepCard num="01" title="Connect Instagram" sub="OAuth resmi via Meta. Read & reply scope.">
+        <StepCard num="01" title="Hubungkan Instagram" sub="OAuth resmi via Instagram Login. Scope baca & balas komentar/DM.">
           <div className="bg-bg border-line rounded-[10px] border p-4">
             <div className="mb-3.5 flex items-center gap-3">
               <Placeholder label="ig logo" height={44} style={{ width: 44 }} />
               <div>
-                <div className="text-sm font-medium">Authorize Zosmed</div>
-                <div className="mono text-text-3 text-[11px]">3 permissions · revocable anytime</div>
+                <div className="text-sm font-medium">Otorisasi Zosmed</div>
+                <div className="mono text-text-3 text-[11px]">3 izin akses · bisa dicabut kapan saja</div>
               </div>
               <Pill tone="lime" style={{ marginLeft: 'auto' }}>
                 VERIFIED
               </Pill>
             </div>
-            {['Read comments & DMs', 'Reply to comments & send DMs', 'Manage automated rules'].map((l) => (
+            {['Baca komentar & DM', 'Balas komentar & kirim DM', 'Kelola aturan otomatis'].map((l) => (
               <div key={l} className="text-text-2 flex items-center gap-2 py-1.5 text-xs">
                 <span className="text-lime inline-flex h-4 w-4 items-center justify-center rounded-full" style={{ background: 'oklch(0.9 0.2 130 / 0.18)' }}>
                   <I.check />
@@ -56,9 +62,24 @@ export default function OnboardingPage() {
                 {l}
               </div>
             ))}
-            <button className="btn-lime mt-3.5 w-full justify-center">
-              Connect with Instagram <I.arrow />
-            </button>
+
+            <div className="border-bg-3 mt-3.5 flex items-center gap-2 border-t pt-3.5">
+              <Pill tone={ACCOUNT_STATUS_TONE[account.status]}>{ACCOUNT_STATUS_LABEL[account.status].toUpperCase()}</Pill>
+              {connected ? (
+                <span className="text-sm">
+                  <span className="font-medium">{account.displayName}</span>{' '}
+                  <span className="mono text-text-3 text-[12px]">@{account.handle}</span>
+                </span>
+              ) : null}
+            </div>
+
+            {connected ? (
+              <div className="text-text-2 mt-2.5 text-xs">Akun sudah terhubung — lanjut ke langkah berikutnya.</div>
+            ) : (
+              <a href={connectUrl} className="btn-lime mt-3.5 w-full justify-center">
+                {account.status === 'expired' ? 'Hubungkan ulang Instagram' : 'Hubungkan Instagram'} <I.arrow />
+              </a>
+            )}
           </div>
         </StepCard>
 

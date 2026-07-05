@@ -7,7 +7,8 @@ import (
 
 // ReplyToComment posts a public reply to an existing comment on a post or Reel.
 //
-// Endpoint: POST /{comment-id}/replies
+// Endpoint: POST /{comment-id}/replies (RESOLVED G2 — path & body unchanged
+// from the legacy Graph API, only the host changed to graph.instagram.com).
 //
 // Rate limits (enforced by safety layer, not here):
 //   - 750 comment replies per hour (Meta hard cap).
