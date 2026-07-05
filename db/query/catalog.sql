@@ -15,6 +15,16 @@ SELECT * FROM catalog_post
 WHERE account_id = @account_id
 ORDER BY created_at DESC;
 
+-- name: UpsertCatalogPost :one
+-- Idempotent registration of a post/Reel for comment-to-order (used by
+-- cmd/seed; re-running never duplicates a row for the same account+media).
+INSERT INTO catalog_post (account_id, ig_media_id, caption, active)
+VALUES (@account_id, @ig_media_id, @caption, @active)
+ON CONFLICT (account_id, ig_media_id) DO UPDATE SET
+    caption = EXCLUDED.caption,
+    active  = EXCLUDED.active
+RETURNING *;
+
 -- Settings: per-account keyword & hold config (§4.4).
 
 -- name: GetCommentOrderSettings :one

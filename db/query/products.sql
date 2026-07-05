@@ -7,6 +7,17 @@ SELECT * FROM product
 WHERE catalog_post_id = @catalog_post_id
   AND code            = @code;
 
+-- name: UpsertProduct :one
+-- Idempotent registration of a keep/C product (used by cmd/seed). On
+-- conflict only identity fields (name/price) are refreshed — stock is left
+-- untouched so re-seeding doesn't reset stock consumed by prior test runs.
+INSERT INTO product (catalog_post_id, code, name, price_idr, stock_total, stock_left)
+VALUES (@catalog_post_id, @code, @name, @price_idr, @stock_total, @stock_total)
+ON CONFLICT (catalog_post_id, code) DO UPDATE SET
+    name      = EXCLUDED.name,
+    price_idr = EXCLUDED.price_idr
+RETURNING *;
+
 -- name: DecrementStock :one
 -- Atomically claim one unit. Returns the updated row; returns no rows if stock_left = 0.
 -- Caller treats zero rows as "out of stock" — do NOT create a reservation in that case.

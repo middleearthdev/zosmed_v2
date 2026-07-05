@@ -35,7 +35,9 @@ type GetCommentOrderStatsRow struct {
 // All queries keyed by catalog_post_id or account_id; designed for a single
 // GET /api/v1/comment-order?accountId=&postId= handler that fans out these 4 queries.
 // Counts by reservation status for the stats row (CommentOrderStatDTO).
-// total_detected = total reservations ever created for this post (code-detected).
+// total_detected = total reservations ever created for this post = keep codes
+// detected THAT HAD STOCK. Out-of-stock keep comments create no reservation and
+// are not counted here (N9) — the FE tile is labelled "ter-reserve", not "detected".
 func (q *Queries) GetCommentOrderStats(ctx context.Context, catalogPostID pgtype.UUID) (GetCommentOrderStatsRow, error) {
 	row := q.db.QueryRow(ctx, getCommentOrderStats, catalogPostID)
 	var i GetCommentOrderStatsRow

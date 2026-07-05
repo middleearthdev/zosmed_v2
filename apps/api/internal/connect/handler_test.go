@@ -9,9 +9,18 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/zosmed/zosmed/apps/api/internal/auth"
 	"github.com/zosmed/zosmed/libs/igapi"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
 )
+
+// authedRequest returns req with an authenticated context injected, as
+// RequireUser would have done in production (ADR-003 §6) — Start is mounted
+// behind RequireUser, so tests simulate that instead of a real cookie/DB round-trip.
+func authedRequest(req *http.Request, userID string) *http.Request {
+	ctx := auth.WithUser(req.Context(), auth.UserDTO{ID: userID})
+	return req.WithContext(ctx)
+}
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -53,9 +62,11 @@ func (f *fakeIdentity) Me(_ context.Context) (igapi.MeResult, error) {
 }
 
 type fakeStore struct {
-	err      error
-	captured UpsertAccountParams
-	called   bool
+	err                error
+	captured           UpsertAccountParams
+	called             bool
+	onboardingComplete bool
+	onboardingErr      error
 }
 
 func (f *fakeStore) UpsertAccount(_ context.Context, p UpsertAccountParams) (dbgen.Account, error) {
@@ -65,6 +76,13 @@ func (f *fakeStore) UpsertAccount(_ context.Context, p UpsertAccountParams) (dbg
 		return dbgen.Account{}, f.err
 	}
 	return dbgen.Account{IgUserID: p.IgUserID}, nil
+}
+
+func (f *fakeStore) UserOnboardingComplete(_ context.Context, _ string) (bool, error) {
+	if f.onboardingErr != nil {
+		return false, f.onboardingErr
+	}
+	return f.onboardingComplete, nil
 }
 
 // newTestHandler builds a Handler wired with fakes, bypassing New's production wiring.
@@ -86,7 +104,7 @@ func newTestHandler(appSecret string, oauth oauthExchanger, identity identityRes
 func TestStart_RedirectsWithState(t *testing.T) {
 	h := newTestHandler("secret", &fakeOAuth{}, &fakeIdentity{}, &fakeStore{})
 
-	req := httptest.NewRequest(http.MethodGet, "/connect/instagram", nil)
+	req := authedRequest(httptest.NewRequest(http.MethodGet, "/connect/instagram", nil), "user-123")
 	w := httptest.NewRecorder()
 	h.Start(w, req)
 
@@ -99,11 +117,23 @@ func TestStart_RedirectsWithState(t *testing.T) {
 	}
 }
 
+func TestStart_NoUserInContext_Returns401(t *testing.T) {
+	h := newTestHandler("secret", &fakeOAuth{}, &fakeIdentity{}, &fakeStore{})
+
+	req := httptest.NewRequest(http.MethodGet, "/connect/instagram", nil) // no injected user
+	w := httptest.NewRecorder()
+	h.Start(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
 // ── Callback ──────────────────────────────────────────────────────────────────
 
 func validState(t *testing.T, secret string) string {
 	t.Helper()
-	s, err := NewState(secret)
+	s, err := NewState(secret, "user-123")
 	if err != nil {
 		t.Fatalf("NewState: %v", err)
 	}
@@ -135,6 +165,32 @@ func TestCallback_Success(t *testing.T) {
 	}
 	if store.captured.AccessToken != "long-tok" {
 		t.Errorf("expected AccessToken=long-tok, got %q", store.captured.AccessToken)
+	}
+	if store.captured.UserID != "user-123" {
+		t.Errorf("expected UserID=user-123 (from signed state, ADR-003 §6), got %q", store.captured.UserID)
+	}
+	// Default fakeStore.onboardingComplete=false -> redirect back to onboarding (ADR-003 §0 decision 3).
+	if loc := w.Header().Get("Location"); loc != "/onboarding?connected=1" {
+		t.Errorf("expected redirect to /onboarding?connected=1, got %q", loc)
+	}
+}
+
+func TestCallback_RedirectsToSettings_WhenOnboardingComplete(t *testing.T) {
+	oauth := &fakeOAuth{
+		exchangeCodeResult:    igapi.ShortLivedToken{AccessToken: "short-tok", UserID: "1"},
+		exchangeLongLivedResp: igapi.LongLivedToken{AccessToken: "long-tok", TokenType: "bearer", ExpiresIn: 5184000},
+	}
+	identity := &fakeIdentity{result: igapi.MeResult{UserID: "17841400", Username: "olshop_budi"}}
+	store := &fakeStore{onboardingComplete: true}
+	h := newTestHandler("secret", oauth, identity, store)
+
+	state := validState(t, "secret")
+	req := httptest.NewRequest(http.MethodGet, "/connect/instagram/callback?code=abc&state="+state, nil)
+	w := httptest.NewRecorder()
+	h.Callback(w, req)
+
+	if loc := w.Header().Get("Location"); loc != "/settings?connected=1" {
+		t.Errorf("expected redirect to /settings?connected=1 for an already-onboarded user, got %q", loc)
 	}
 }
 

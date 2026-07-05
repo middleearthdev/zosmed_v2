@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/zosmed/zosmed/apps/api/internal/auth"
 	"github.com/zosmed/zosmed/apps/api/internal/httpx"
 	"github.com/zosmed/zosmed/libs/igapi"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
@@ -34,6 +35,9 @@ type identityResolver interface {
 // accountUpserter is the persistence seam Handler needs; Store satisfies it.
 type accountUpserter interface {
 	UpsertAccount(ctx context.Context, p UpsertAccountParams) (dbgen.Account, error)
+	// UserOnboardingComplete reports whether userID has finished onboarding
+	// (ADR-003 §6), used to pick the post-connect redirect target.
+	UserOnboardingComplete(ctx context.Context, userID string) (bool, error)
 }
 
 // Handler implements the connect (OAuth) HTTP endpoints.
@@ -59,9 +63,18 @@ func New(oauth igapi.OAuthConfig, appSecret string, store *Store, log *slog.Logg
 }
 
 // Start handles GET /connect/instagram: redirects to Instagram's authorize
-// screen with a signed anti-CSRF state (ADR-002 §3.1 step 1).
+// screen with a signed anti-CSRF state (ADR-002 §3.1 step 1), embedding the
+// logged-in Zosmed user id (ADR-003 AC-9) so Callback can link the resulting
+// account. Mounted behind RequireUser (httpx/router.go) — a user is always
+// present in context here.
 func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
-	state, err := NewState(h.appSecret)
+	user, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		httpx.Err(w, http.StatusUnauthorized, "unauthorized", "Silakan login terlebih dahulu")
+		return
+	}
+
+	state, err := NewState(h.appSecret, user.ID)
 	if err != nil {
 		h.log.Error("connect: generate state", slog.String("error", err.Error()))
 		httpx.Err(w, http.StatusInternalServerError, "state_generation_failed", "Gagal memulai koneksi Instagram, coba lagi")
@@ -83,7 +96,8 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !VerifyState(q.Get("state"), h.appSecret) {
+	userID, ok := VerifyState(q.Get("state"), h.appSecret)
+	if !ok {
 		h.log.Warn("connect: invalid or expired state")
 		httpx.Err(w, http.StatusForbidden, "invalid_state", "Sesi koneksi tidak valid atau kedaluwarsa, coba lagi")
 		return
@@ -130,6 +144,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		TokenType:      tokenType,
 		Scopes:         igapi.DefaultScopes,
 		TokenExpiresAt: expiresAt,
+		UserID:         userID,
 	}); err != nil {
 		h.log.Error("connect: persist account", slog.String("error", err.Error()))
 		httpx.Err(w, http.StatusInternalServerError, "persist_account_failed", "Gagal menyimpan akun Instagram")
@@ -137,5 +152,16 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.log.Info("connect: account connected", slog.String("ig_user_id", me.UserID), slog.String("handle", me.Username))
-	http.Redirect(w, r, "/settings?connected=1", http.StatusFound)
+
+	// Redirect target depends on onboarding state (ADR-003 §0 decision 3):
+	// still onboarding -> back to /onboarding to continue the flow; already
+	// onboarded (re-connecting from Settings) -> /settings. Default safe on
+	// lookup failure is /onboarding.
+	redirectTo := "/onboarding?connected=1"
+	if completed, err := h.store.UserOnboardingComplete(ctx, userID); err != nil {
+		h.log.Error("connect: check onboarding status", slog.String("error", err.Error()))
+	} else if completed {
+		redirectTo = "/settings?connected=1"
+	}
+	http.Redirect(w, r, redirectTo, http.StatusFound)
 }

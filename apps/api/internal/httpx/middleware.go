@@ -84,9 +84,3 @@ func Logger(next http.Handler) http.Handler {
 		)
 	})
 }
-
-// AuthStub is a no-op authentication middleware for MVP.
-// TODO(auth): replace with JWT/session validation before production.
-func AuthStub(next http.Handler) http.Handler {
-	return next
-}

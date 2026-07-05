@@ -12,7 +12,7 @@ import (
 )
 
 const getAccountByID = `-- name: GetAccountByID :one
-SELECT id, ig_user_id, handle, display_name, status, created_at, access_token, token_type, scopes, token_expires_at, token_refreshed_at FROM account WHERE id = $1
+SELECT id, ig_user_id, handle, display_name, status, created_at, access_token, token_type, scopes, token_expires_at, token_refreshed_at, user_id FROM account WHERE id = $1
 `
 
 // Worker resolution: account_id (UUID, from task payload) → token + ig_user_id (ADR-002 §6.2).
@@ -31,13 +31,14 @@ func (q *Queries) GetAccountByID(ctx context.Context, id pgtype.UUID) (Account, 
 		&i.Scopes,
 		&i.TokenExpiresAt,
 		&i.TokenRefreshedAt,
+		&i.UserID,
 	)
 	return i, err
 }
 
 const getAccountByIgUserID = `-- name: GetAccountByIgUserID :one
 
-SELECT id, ig_user_id, handle, display_name, status, created_at, access_token, token_type, scopes, token_expires_at, token_refreshed_at FROM account WHERE ig_user_id = $1
+SELECT id, ig_user_id, handle, display_name, status, created_at, access_token, token_type, scopes, token_expires_at, token_refreshed_at, user_id FROM account WHERE ig_user_id = $1
 `
 
 // Account + token store queries (ADR-002 §4.3). Token is the sole credential
@@ -59,12 +60,38 @@ func (q *Queries) GetAccountByIgUserID(ctx context.Context, igUserID string) (Ac
 		&i.Scopes,
 		&i.TokenExpiresAt,
 		&i.TokenRefreshedAt,
+		&i.UserID,
+	)
+	return i, err
+}
+
+const getAccountByUserID = `-- name: GetAccountByUserID :one
+SELECT id, ig_user_id, handle, display_name, status, created_at, access_token, token_type, scopes, token_expires_at, token_refreshed_at, user_id FROM account WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1
+`
+
+// For /auth/me: the one IG account belonging to a user (MVP: one account). LIMIT 1.
+func (q *Queries) GetAccountByUserID(ctx context.Context, userID pgtype.UUID) (Account, error) {
+	row := q.db.QueryRow(ctx, getAccountByUserID, userID)
+	var i Account
+	err := row.Scan(
+		&i.ID,
+		&i.IgUserID,
+		&i.Handle,
+		&i.DisplayName,
+		&i.Status,
+		&i.CreatedAt,
+		&i.AccessToken,
+		&i.TokenType,
+		&i.Scopes,
+		&i.TokenExpiresAt,
+		&i.TokenRefreshedAt,
+		&i.UserID,
 	)
 	return i, err
 }
 
 const listAccountsDueForRefresh = `-- name: ListAccountsDueForRefresh :many
-SELECT id, ig_user_id, handle, display_name, status, created_at, access_token, token_type, scopes, token_expires_at, token_refreshed_at FROM account
+SELECT id, ig_user_id, handle, display_name, status, created_at, access_token, token_type, scopes, token_expires_at, token_refreshed_at, user_id FROM account
 WHERE status = 'connected'
   AND token_expires_at IS NOT NULL
   AND token_expires_at < $1
@@ -94,6 +121,7 @@ func (q *Queries) ListAccountsDueForRefresh(ctx context.Context, threshold pgtyp
 			&i.Scopes,
 			&i.TokenExpiresAt,
 			&i.TokenRefreshedAt,
+			&i.UserID,
 		); err != nil {
 			return nil, err
 		}
@@ -152,7 +180,8 @@ INSERT INTO account (
     scopes,
     token_expires_at,
     token_refreshed_at,
-    status
+    status,
+    user_id
 ) VALUES (
     $1,
     $2,
@@ -162,7 +191,8 @@ INSERT INTO account (
     $6,
     $7,
     now(),
-    'connected'
+    'connected',
+    $8
 )
 ON CONFLICT (ig_user_id) DO UPDATE SET
     handle             = EXCLUDED.handle,
@@ -172,8 +202,9 @@ ON CONFLICT (ig_user_id) DO UPDATE SET
     scopes             = EXCLUDED.scopes,
     token_expires_at   = EXCLUDED.token_expires_at,
     token_refreshed_at = now(),
-    status             = 'connected'
-RETURNING id, ig_user_id, handle, display_name, status, created_at, access_token, token_type, scopes, token_expires_at, token_refreshed_at
+    status             = 'connected',
+    user_id            = EXCLUDED.user_id
+RETURNING id, ig_user_id, handle, display_name, status, created_at, access_token, token_type, scopes, token_expires_at, token_refreshed_at, user_id
 `
 
 type UpsertAccountFromOAuthParams struct {
@@ -184,10 +215,14 @@ type UpsertAccountFromOAuthParams struct {
 	TokenType      string             `json:"token_type"`
 	Scopes         []string           `json:"scopes"`
 	TokenExpiresAt pgtype.Timestamptz `json:"token_expires_at"`
+	UserID         pgtype.UUID        `json:"user_id"`
 }
 
 // Connect callback: persist a freshly (re-)connected account. Re-connecting
 // an existing ig_user_id refreshes its token and clears any prior 'expired' status.
+// user_id (ADR-003 §2/§9) links the account to the Zosmed user whose signed
+// state initiated the connect flow; nullable so re-connects from unauthenticated
+// contexts (none exist post-ADR-003, kept for defensive nullability) don't fail.
 func (q *Queries) UpsertAccountFromOAuth(ctx context.Context, arg UpsertAccountFromOAuthParams) (Account, error) {
 	row := q.db.QueryRow(ctx, upsertAccountFromOAuth,
 		arg.IgUserID,
@@ -197,6 +232,7 @@ func (q *Queries) UpsertAccountFromOAuth(ctx context.Context, arg UpsertAccountF
 		arg.TokenType,
 		arg.Scopes,
 		arg.TokenExpiresAt,
+		arg.UserID,
 	)
 	var i Account
 	err := row.Scan(
@@ -211,6 +247,7 @@ func (q *Queries) UpsertAccountFromOAuth(ctx context.Context, arg UpsertAccountF
 		&i.Scopes,
 		&i.TokenExpiresAt,
 		&i.TokenRefreshedAt,
+		&i.UserID,
 	)
 	return i, err
 }

@@ -87,6 +87,16 @@ type Account struct {
 	Scopes           []string           `json:"scopes"`
 	TokenExpiresAt   pgtype.Timestamptz `json:"token_expires_at"`
 	TokenRefreshedAt pgtype.Timestamptz `json:"token_refreshed_at"`
+	UserID           pgtype.UUID        `json:"user_id"`
+}
+
+type AppUser struct {
+	ID                    pgtype.UUID        `json:"id"`
+	Email                 string             `json:"email"`
+	PasswordHash          string             `json:"password_hash"`
+	Segment               *string            `json:"segment"`
+	OnboardingCompletedAt pgtype.Timestamptz `json:"onboarding_completed_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 }
 
 type CatalogPost struct {
@@ -151,4 +161,11 @@ type Reservation struct {
 	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
 	ClosedAt        pgtype.Timestamptz `json:"closed_at"`
 	WaLink          string             `json:"wa_link"`
+}
+
+type UserSession struct {
+	TokenHash string             `json:"token_hash"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 }

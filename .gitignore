@@ -35,3 +35,4 @@ bun-debug.log*
 # go compiled binaries (jangan commit hasil build)
 /apps/api/api
 /apps/worker/worker
+/apps/api/seed

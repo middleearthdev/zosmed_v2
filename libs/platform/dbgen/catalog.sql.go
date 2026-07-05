@@ -112,6 +112,44 @@ func (q *Queries) ListCatalogPostsByAccount(ctx context.Context, accountID pgtyp
 	return items, nil
 }
 
+const upsertCatalogPost = `-- name: UpsertCatalogPost :one
+INSERT INTO catalog_post (account_id, ig_media_id, caption, active)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (account_id, ig_media_id) DO UPDATE SET
+    caption = EXCLUDED.caption,
+    active  = EXCLUDED.active
+RETURNING id, account_id, ig_media_id, caption, comments_count, active, created_at
+`
+
+type UpsertCatalogPostParams struct {
+	AccountID pgtype.UUID `json:"account_id"`
+	IgMediaID string      `json:"ig_media_id"`
+	Caption   string      `json:"caption"`
+	Active    bool        `json:"active"`
+}
+
+// Idempotent registration of a post/Reel for comment-to-order (used by
+// cmd/seed; re-running never duplicates a row for the same account+media).
+func (q *Queries) UpsertCatalogPost(ctx context.Context, arg UpsertCatalogPostParams) (CatalogPost, error) {
+	row := q.db.QueryRow(ctx, upsertCatalogPost,
+		arg.AccountID,
+		arg.IgMediaID,
+		arg.Caption,
+		arg.Active,
+	)
+	var i CatalogPost
+	err := row.Scan(
+		&i.ID,
+		&i.AccountID,
+		&i.IgMediaID,
+		&i.Caption,
+		&i.CommentsCount,
+		&i.Active,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const upsertCommentOrderSettings = `-- name: UpsertCommentOrderSettings :one
 INSERT INTO comment_order_settings (account_id, keywords, hold_seconds, reply_template)
 VALUES ($1, $2, $3, $4)

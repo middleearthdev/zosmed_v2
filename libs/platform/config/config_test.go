@@ -74,6 +74,51 @@ func TestLoad_DefaultPort(t *testing.T) {
 	}
 }
 
+func TestLoad_AppEnvDefaultsToDev(t *testing.T) {
+	t.Setenv("DB_URL", "postgresql://localhost/zosmed")
+	t.Setenv("REDIS_URL", "redis://localhost:6379")
+	t.Setenv("IG_APP_ID", "1")
+	t.Setenv("IG_APP_SECRET", "s")
+	t.Setenv("IG_VERIFY_TOKEN", "v")
+	t.Setenv("IG_REDIRECT_URI", "https://cb")
+	t.Setenv("WA_PHONE", "628111")
+	t.Setenv("APP_ENV", "") // not set
+
+	c, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.AppEnv != "dev" {
+		t.Errorf("expected default AppEnv=dev, got %s", c.AppEnv)
+	}
+	if c.IsProd() {
+		t.Error("expected IsProd()=false for dev")
+	}
+}
+
+func TestLoad_AppEnvProd_IsProdTrue(t *testing.T) {
+	t.Setenv("DB_URL", "postgresql://localhost/zosmed")
+	t.Setenv("REDIS_URL", "redis://localhost:6379")
+	t.Setenv("IG_APP_ID", "1")
+	t.Setenv("IG_APP_SECRET", "s")
+	t.Setenv("IG_VERIFY_TOKEN", "v")
+	t.Setenv("IG_REDIRECT_URI", "https://cb")
+	t.Setenv("WA_PHONE", "628111")
+	t.Setenv("APP_ENV", "prod")
+	t.Setenv("WEB_BASE_URL", "https://app.zosmed.example.com")
+
+	c, err := config.Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !c.IsProd() {
+		t.Error("expected IsProd()=true for APP_ENV=prod")
+	}
+	if c.WebBaseURL != "https://app.zosmed.example.com" {
+		t.Errorf("expected WebBaseURL to round-trip, got %s", c.WebBaseURL)
+	}
+}
+
 func TestLoad_MissingSpecific(t *testing.T) {
 	cases := []struct {
 		name    string

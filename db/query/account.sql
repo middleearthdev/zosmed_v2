@@ -13,6 +13,9 @@ SELECT * FROM account WHERE id = @id;
 -- name: UpsertAccountFromOAuth :one
 -- Connect callback: persist a freshly (re-)connected account. Re-connecting
 -- an existing ig_user_id refreshes its token and clears any prior 'expired' status.
+-- user_id (ADR-003 §2/§9) links the account to the Zosmed user whose signed
+-- state initiated the connect flow; nullable so re-connects from unauthenticated
+-- contexts (none exist post-ADR-003, kept for defensive nullability) don't fail.
 INSERT INTO account (
     ig_user_id,
     handle,
@@ -22,7 +25,8 @@ INSERT INTO account (
     scopes,
     token_expires_at,
     token_refreshed_at,
-    status
+    status,
+    user_id
 ) VALUES (
     @ig_user_id,
     @handle,
@@ -32,7 +36,8 @@ INSERT INTO account (
     @scopes,
     @token_expires_at,
     now(),
-    'connected'
+    'connected',
+    @user_id
 )
 ON CONFLICT (ig_user_id) DO UPDATE SET
     handle             = EXCLUDED.handle,
@@ -42,8 +47,13 @@ ON CONFLICT (ig_user_id) DO UPDATE SET
     scopes             = EXCLUDED.scopes,
     token_expires_at   = EXCLUDED.token_expires_at,
     token_refreshed_at = now(),
-    status             = 'connected'
+    status             = 'connected',
+    user_id            = EXCLUDED.user_id
 RETURNING *;
+
+-- name: GetAccountByUserID :one
+-- For /auth/me: the one IG account belonging to a user (MVP: one account). LIMIT 1.
+SELECT * FROM account WHERE user_id = @user_id ORDER BY created_at ASC LIMIT 1;
 
 -- name: UpdateAccountToken :exec
 -- Refresh scheduler: persist a successfully refreshed token (ADR-002 §5 step 2).

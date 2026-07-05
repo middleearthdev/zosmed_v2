@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zosmed/zosmed/apps/api/internal/auth"
 	"github.com/zosmed/zosmed/apps/api/internal/commentorder"
 	"github.com/zosmed/zosmed/apps/api/internal/connect"
 	"github.com/zosmed/zosmed/apps/api/internal/enqueue"
@@ -65,6 +66,11 @@ func main() {
 	connectStore := connect.NewStore(queries)
 	connectHandler := connect.New(oauthCfg, cfg.IGAppSecret, connectStore, log)
 
+	// ── Zosmed login + onboarding (ADR-003) ──────────────────────────────────────
+	authStore := auth.NewStore(queries)
+	authHandler := auth.New(authStore, cfg.IsProd(), log)
+	requireUser := auth.RequireUser(authStore)
+
 	// ── Build handlers ────────────────────────────────────────────────────────────
 	// Account resolution is per-webhook-entry now (entry.id → GetAccountByIgUserID,
 	// ADR-002 §6.1) — no more single-account env var.
@@ -73,15 +79,22 @@ func main() {
 
 	// ── Wire router ───────────────────────────────────────────────────────────────
 	router := httpx.NewRouter(httpx.Routes{
-		WebhookChallenge: whHandler.Challenge,
-		WebhookReceive:   whHandler.Receive,
-		ConnectStart:     connectHandler.Start,
-		ConnectCallback:  connectHandler.Callback,
-		GetCommentOrder:  coHandler.GetCommentOrder,
-		GetReservation:   coHandler.GetReservation,
-		CloseReservation: coHandler.CloseReservation,
-		GetSettings:      coHandler.GetSettings,
-		PutSettings:      coHandler.PutSettings,
+		WebhookChallenge:   whHandler.Challenge,
+		WebhookReceive:     whHandler.Receive,
+		ConnectStart:       connectHandler.Start,
+		ConnectCallback:    connectHandler.Callback,
+		GetCommentOrder:    coHandler.GetCommentOrder,
+		GetReservation:     coHandler.GetReservation,
+		CloseReservation:   coHandler.CloseReservation,
+		GetSettings:        coHandler.GetSettings,
+		PutSettings:        coHandler.PutSettings,
+		Register:           authHandler.Register,
+		Login:              authHandler.Login,
+		Logout:             authHandler.Logout,
+		Me:                 authHandler.Me,
+		PutSegment:         authHandler.PutSegment,
+		CompleteOnboarding: authHandler.CompleteOnboarding,
+		RequireUser:        requireUser,
 	})
 
 	// ── HTTP server ───────────────────────────────────────────────────────────────

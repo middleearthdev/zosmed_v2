@@ -17,42 +17,53 @@ import (
 const stateTTL = 10 * time.Minute
 
 // NewState creates a signed, opaque anti-CSRF state value for the OAuth
-// connect flow (ADR-002 §3.3). No DB/session storage is needed: the value
-// itself is self-verifying via HMAC(nonce.timestamp, appSecret) — the same
-// App Secret already used for OAuth client_secret and webhook HMAC (DRY §12a-1).
+// connect flow (ADR-002 §3.3), embedding the Zosmed user id who initiated it
+// (ADR-003 §6) so Callback can link the resulting Instagram account back to
+// that user without needing a cookie (Instagram calls Callback directly).
+// No DB/session storage is needed: the value itself is self-verifying via
+// HMAC(nonce.timestamp.userID, appSecret) — the same App Secret already used
+// for OAuth client_secret and webhook HMAC (DRY §12a-1).
 //
-// Format: "<nonce-b64>.<unix-ts>.<hmac-b64>"
-func NewState(appSecret string) (string, error) {
+// Format: "<nonce-b64>.<unix-ts>.<userID>.<hmac-b64>"
+func NewState(appSecret, userID string) (string, error) {
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("connect: generate state nonce: %w", err)
 	}
 	nonceEnc := base64.RawURLEncoding.EncodeToString(nonce)
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	payload := nonceEnc + "." + ts
+	payload := nonceEnc + "." + ts + "." + userID
 	return payload + "." + sign(payload, appSecret), nil
 }
 
 // VerifyState checks the signature and TTL of a state value produced by
-// NewState. Returns false on any malformed input, signature mismatch, or
-// expiry — the callback handler treats all of these as "reject the callback".
-func VerifyState(state, appSecret string) bool {
-	parts := strings.SplitN(state, ".", 3)
-	if len(parts) != 3 {
-		return false
+// NewState, returning the embedded userID on success. Returns ok=false on any
+// malformed input, signature mismatch, or expiry — the callback handler
+// treats all of these as "reject the callback".
+func VerifyState(state, appSecret string) (userID string, ok bool) {
+	parts := strings.SplitN(state, ".", 4)
+	if len(parts) != 4 {
+		return "", false
 	}
-	nonceEnc, tsStr, sig := parts[0], parts[1], parts[2]
+	nonceEnc, tsStr, uid, sig := parts[0], parts[1], parts[2], parts[3]
 
-	expected := sign(nonceEnc+"."+tsStr, appSecret)
+	payload := nonceEnc + "." + tsStr + "." + uid
+	expected := sign(payload, appSecret)
 	if !hmac.Equal([]byte(sig), []byte(expected)) {
-		return false
+		return "", false
 	}
 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
 	if err != nil {
-		return false
+		return "", false
 	}
-	return time.Since(time.Unix(ts, 0)) <= stateTTL
+	if time.Since(time.Unix(ts, 0)) > stateTTL {
+		return "", false
+	}
+	if uid == "" {
+		return "", false
+	}
+	return uid, true
 }
 
 func sign(payload, secret string) string {

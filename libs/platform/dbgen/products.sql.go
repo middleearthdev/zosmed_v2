@@ -89,3 +89,44 @@ func (q *Queries) IncrementStock(ctx context.Context, id pgtype.UUID) (Product, 
 	)
 	return i, err
 }
+
+const upsertProduct = `-- name: UpsertProduct :one
+INSERT INTO product (catalog_post_id, code, name, price_idr, stock_total, stock_left)
+VALUES ($1, $2, $3, $4, $5, $5)
+ON CONFLICT (catalog_post_id, code) DO UPDATE SET
+    name      = EXCLUDED.name,
+    price_idr = EXCLUDED.price_idr
+RETURNING id, catalog_post_id, code, name, price_idr, stock_total, stock_left
+`
+
+type UpsertProductParams struct {
+	CatalogPostID pgtype.UUID `json:"catalog_post_id"`
+	Code          string      `json:"code"`
+	Name          string      `json:"name"`
+	PriceIdr      int64       `json:"price_idr"`
+	StockTotal    int32       `json:"stock_total"`
+}
+
+// Idempotent registration of a keep/C product (used by cmd/seed). On
+// conflict only identity fields (name/price) are refreshed — stock is left
+// untouched so re-seeding doesn't reset stock consumed by prior test runs.
+func (q *Queries) UpsertProduct(ctx context.Context, arg UpsertProductParams) (Product, error) {
+	row := q.db.QueryRow(ctx, upsertProduct,
+		arg.CatalogPostID,
+		arg.Code,
+		arg.Name,
+		arg.PriceIdr,
+		arg.StockTotal,
+	)
+	var i Product
+	err := row.Scan(
+		&i.ID,
+		&i.CatalogPostID,
+		&i.Code,
+		&i.Name,
+		&i.PriceIdr,
+		&i.StockTotal,
+		&i.StockLeft,
+	)
+	return i, err
+}

@@ -28,6 +28,19 @@ type Config struct {
 	WAPhone string
 	// Port is the HTTP server port; defaults to "8080" if not set (PORT).
 	Port string
+	// AppEnv is the deployment environment (APP_ENV): "dev" (default) or "prod".
+	// Controls the session cookie's Secure flag (ADR-003 §0 decision 1) and
+	// guards apps/api/cmd/seed against running against production data.
+	AppEnv string
+	// WebBaseURL is the frontend's base URL (WEB_BASE_URL), used for absolute
+	// redirects if a handler ever needs one instead of a relative path
+	// (ADR-003 §6). Optional — most redirects in this codebase are relative.
+	WebBaseURL string
+}
+
+// IsProd reports whether AppEnv is "prod".
+func (c *Config) IsProd() bool {
+	return c.AppEnv == "prod"
 }
 
 // Load reads env vars, validates required fields, and returns a Config.
@@ -42,12 +55,17 @@ func Load() (*Config, error) {
 		IGRedirectURI: os.Getenv("IG_REDIRECT_URI"),
 		WAPhone:       os.Getenv("WA_PHONE"),
 		Port:          os.Getenv("PORT"),
+		AppEnv:        os.Getenv("APP_ENV"),
+		WebBaseURL:    os.Getenv("WEB_BASE_URL"),
 	}
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
 	if c.Port == "" {
 		c.Port = "8080"
+	}
+	if c.AppEnv == "" {
+		c.AppEnv = "dev"
 	}
 	return c, nil
 }
