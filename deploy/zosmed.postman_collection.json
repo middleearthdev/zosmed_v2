@@ -13,9 +13,115 @@
     { "key": "igVerifyToken", "value": "my-verify-token", "type": "string" },
     { "key": "igAppSecret", "value": "my-app-secret", "type": "string" },
     { "key": "hubChallenge", "value": "challenge-echo-123", "type": "string" },
-    { "key": "hubSignature", "value": "", "type": "string" }
+    { "key": "hubSignature", "value": "", "type": "string" },
+    { "key": "demoEmail", "value": "demo@zosmed.test", "type": "string" },
+    { "key": "demoPassword", "value": "demo12345", "type": "string" }
   ],
   "item": [
+    {
+      "name": "Auth & Onboarding",
+      "description": "Login/registrasi + onboarding (ADR-003). Sesi via cookie httpOnly `zsid` — Postman menyimpan cookie di **cookie jar** per-domain otomatis, jadi setelah **Login**/**Register** semua request lain (me, onboarding, logout) ikut terkirim cookie-nya tanpa setup manual.\n\nAlur cepat: **Login** (seed: `demo@zosmed.test`/`demo12345`) → **Get Me** → **Set Segment** → **Complete Onboarding** → **Logout**.",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"baru@zosmed.test\",\n  \"password\": \"password123\",\n  \"segment\": \"seller\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/register",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "auth", "register"]
+            },
+            "description": "Daftar user baru (publik) + langsung login (set cookie `zsid`). `201 {user}`. `409 email_taken` bila email sudah ada; `400 invalid_request` bila email invalid / password <8 atau >72 byte / segmen tak dikenal. `segment` opsional.\n\nCatatan: user baru BELUM punya akun IG connected — Complete Onboarding akan 409 sampai akun IG ditautkan (butuh OAuth nyata). Untuk uji onboarding tuntas tanpa Instagram, pakai user seed via Login."
+          },
+          "response": []
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{demoEmail}}\",\n  \"password\": \"{{demoPassword}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Login (publik). Sukses `200 {user, account}` + set cookie `zsid`. Password salah / email tak ada → `401 invalid_credentials` (respons & timing sama untuk keduanya — anti user-enumeration). Kredensial seed default sudah diisi via variabel `demoEmail`/`demoPassword`."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Me",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "auth", "me"]
+            },
+            "description": "Sesi saat ini (butuh cookie `zsid`). `200 {user:{id,email,segment,onboardingCompleted}, account:{status,handle,displayName}|null}`. Tanpa cookie / sesi invalid → `401 unauthorized`. Tidak pernah memuat password_hash / access_token."
+          },
+          "response": []
+        },
+        {
+          "name": "Set Segment (onboarding step 1)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"segment\": \"seller\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/onboarding/segment",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "onboarding", "segment"]
+            },
+            "description": "Simpan segmen bisnis user (butuh login). `200 {user}`. Nilai valid: `seller` (jualan). `creator`/`booking` fase lanjutan. `400` bila segmen tak dikenal. user_id diambil dari sesi — bukan body (tanpa IDOR)."
+          },
+          "response": []
+        },
+        {
+          "name": "Complete Onboarding",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": { "mode": "raw", "raw": "" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/onboarding/complete",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "onboarding", "complete"]
+            },
+            "description": "Tandai onboarding selesai (butuh login). Syarat: segmen sudah dipilih DAN akun IG `connected`. `200 {user}` bila lengkap; `409 onboarding_incomplete` (+ `reason`, mis. `account_not_connected`) bila belum. User seed sudah punya akun connected → langsung 200 setelah Set Segment."
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": { "mode": "raw", "raw": "" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/logout",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "auth", "logout"]
+            },
+            "description": "Revoke sesi + hapus cookie `zsid` (aman dipanggil tanpa sesi). `200 {ok:true}`. Setelah ini, Get Me → 401."
+          },
+          "response": []
+        }
+      ]
+    },
     {
       "name": "Instagram Login (Connect)",
       "description": "Business Login for Instagram (ADR-002 §3). Dipakai dari browser, bukan dari Postman untuk alur penuh — tapi endpoint bisa diinspeksi di sini.",
