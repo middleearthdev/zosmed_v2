@@ -31,3 +31,7 @@ bun-debug.log*
 # go (backend track — reserved)
 /apps/api/bin/
 /apps/worker/bin/
+
+# go compiled binaries (jangan commit hasil build)
+/apps/api/api
+/apps/worker/worker
