@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -192,6 +193,14 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 		return nil
 	}
 
+	// Capture the comment time now (M4): the webhook entry timestamp, or the
+	// receipt time if the entry omitted it — both are far closer to the real
+	// comment time than the worker's dequeue time would be.
+	commentAt := time.Now().UTC()
+	if ic.EntryTime > 0 {
+		commentAt = time.Unix(ic.EntryTime, 0).UTC()
+	}
+
 	// Step 7: enqueue for worker (heavy lifting: keep-code detect, reserve, reply).
 	// Only the account UUID goes into the payload — the access token stays in
 	// Postgres; the worker looks it up itself (ADR-002 §6.2, never in Redis).
@@ -202,6 +211,7 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 		FromID:       v.From.ID,
 		FromUsername: v.From.Username,
 		Text:         v.Text,
+		CommentAt:    commentAt.Format(time.RFC3339),
 	}); err != nil {
 		return fmt.Errorf("webhook: enqueue comment ingest: %w", err)
 	}

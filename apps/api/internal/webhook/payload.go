@@ -61,7 +61,12 @@ type CommentMedia struct {
 // in MVP single-account mode.
 type IngestComment struct {
 	EntryID string
-	Value   CommentValue
+	// EntryTime is the webhook entry timestamp (Unix seconds). It is the
+	// notification time, which for a fresh comment closely approximates the
+	// comment's created time — used for the §4c 7-day private-reply window (M4).
+	// Full accuracy would require GET /{comment-id}?fields=timestamp (ADR-002 §6.3).
+	EntryTime int64
+	Value     CommentValue
 }
 
 // ExtractComments scans p and returns all successfully parsed comment-field
@@ -88,7 +93,7 @@ func ExtractComments(p MetaPayload) []IngestComment {
 			if cv.ID == "" {
 				cv.ID = cv.CommentID
 			}
-			out = append(out, IngestComment{EntryID: entry.ID, Value: cv})
+			out = append(out, IngestComment{EntryID: entry.ID, EntryTime: entry.Time, Value: cv})
 		}
 	}
 	return out

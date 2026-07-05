@@ -41,6 +41,10 @@ type CommentIngestPayload struct {
 	FromID       string `json:"from_id"`
 	FromUsername string `json:"from_username"`
 	Text         string `json:"text"`
+	// CommentAt is the webhook entry timestamp in RFC3339 (M4). Captured at
+	// ingest so the §4c 7-day window is measured from the comment time, not from
+	// when the worker happens to dequeue the task. Empty on legacy payloads.
+	CommentAt string `json:"comment_at"`
 }
 
 // ReservationExpirePayload is the payload for TaskReservationExpire.

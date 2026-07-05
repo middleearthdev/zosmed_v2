@@ -46,6 +46,9 @@ func TestExtractComments_SingleComment(t *testing.T) {
 	if got.EntryID != "123456789" {
 		t.Errorf("EntryID: want %q, got %q", "123456789", got.EntryID)
 	}
+	if got.EntryTime != 1719600000 {
+		t.Errorf("EntryTime (M4): want %d, got %d", int64(1719600000), got.EntryTime)
+	}
 	if got.Value.ID != cv.ID {
 		t.Errorf("comment ID: want %q, got %q", cv.ID, got.Value.ID)
 	}

@@ -109,6 +109,15 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 		holdSeconds = settings.HoldSeconds
 	}
 
+	// Resolve the comment time for the §4c 7-day window (M4): captured at ingest
+	// in the payload. Fall back to now for legacy/empty payloads.
+	commentAt := time.Now()
+	if p.CommentAt != "" {
+		if parsed, perr := time.Parse(time.RFC3339, p.CommentAt); perr == nil {
+			commentAt = parsed
+		}
+	}
+
 	// Step 6: build a source-agnostic workflow.Event and run the engine.
 	// Raw carries seller-kit-specific context; engine is neutral to these keys.
 	// Guardrail D: {nama} ONLY from webhook payload (p.FromUsername) — not scraped.
@@ -125,7 +134,7 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 			seller.RawKeyKode:          code,
 			seller.RawKeyHoldSeconds:   holdSeconds,
 			seller.RawKeyIgUserID:      account.IgUserID,
-			seller.RawKeyCommentAt:     time.Now(), // approximate; used for 7-day window check
+			seller.RawKeyCommentAt:     commentAt, // from webhook entry.time (M4), not dequeue time
 		},
 	}
 
