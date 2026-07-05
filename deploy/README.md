@@ -72,6 +72,12 @@ Setelah App terdaftar dan server berjalan:
    `status = 'expired'` (bukan crash) dan berhenti mengirim outbound sampai
    pengguna connect ulang.
 
+> ⚠️ **Scheduler = SATU instance.** `apps/worker` menjalankan `asynq.Scheduler`
+> untuk task periodic (`token:refresh-sweep` tiap ~6 jam, `reservation:reconcile`
+> tiap 1 menit). Bila worker di-scale >1 replika, jalankan scheduler hanya di
+> SATU instance (atau di balik leader-lock) agar task periodic tidak ter-enqueue
+> ganda. Task-nya idempotent (aman), tapi enqueue ganda itu mubazir.
+
 ## 5. Checklist App Review (sebelum produksi)
 
 Mode standard access (dev/test users) cukup untuk development, TAPI

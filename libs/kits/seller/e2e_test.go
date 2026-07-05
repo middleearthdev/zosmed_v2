@@ -88,10 +88,16 @@ func (g queueGater) Allow(_ context.Context, _ workflow.OutboundReq) (workflow.D
 // buildE2EEngine creates a workflow.Engine with seller nodes registered,
 // backed by db and using the comment-to-order workflow definition.
 func buildE2EEngine(t *testing.T, db *stubDB, waPhone string) (*workflow.Engine, *seller.ReservationService) {
+	return buildE2EEngineWithOutbound(t, db, waPhone, nil)
+}
+
+// buildE2EEngineWithOutbound is buildE2EEngine plus an injectable outbound-retry
+// enqueue func (MAJOR-2) so tests can assert Queue re-enqueues the private reply.
+func buildE2EEngineWithOutbound(t *testing.T, db *stubDB, waPhone string, enqueueOutbound seller.EnqueueOutboundFunc) (*workflow.Engine, *seller.ReservationService) {
 	t.Helper()
 	svc := seller.NewReservationService(db, noopEnqueue)
 	reg := workflow.NewRegistry()
-	seller.RegisterNodes(reg, svc, waPhone)
+	seller.RegisterNodes(reg, svc, waPhone, enqueueOutbound)
 	def := workflow.WorkflowDef{
 		ID:          "comment-to-order",
 		TriggerKeys: []string{seller.NodeKeyCommentTrigger},
@@ -268,6 +274,52 @@ func TestE2E_GateQueue_ReservationStaysReserved(t *testing.T) {
 	}
 }
 
+// TestE2E_GateQueue_EnqueuesOutboundRetry verifies MAJOR-2: when the gate returns
+// Queue and an enqueueOutbound func is wired, the private reply is re-queued
+// (carrying the reservation + reply context) instead of being dropped.
+func TestE2E_GateQueue_EnqueuesOutboundRetry(t *testing.T) {
+	accountIDStr := seller.UUIDToString(testAccountID)
+	catalogIDStr := seller.UUIDToString(testCatalogPostID)
+
+	db := &stubDB{
+		getProduct: func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
+			return okProduct(), nil
+		},
+		decrementStock: func(_ context.Context, _ pgtype.UUID) (dbgen.Product, error) { return okProduct(), nil },
+		createReservation: func(_ context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error) {
+			res := reservedReservation()
+			res.WaLink = arg.WaLink
+			return res, nil
+		},
+	}
+
+	var captured seller.OutboundRetry
+	captures := 0
+	enqueue := seller.EnqueueOutboundFunc(func(_ context.Context, r seller.OutboundRetry, _ time.Duration) error {
+		captured = r
+		captures++
+		return nil
+	})
+
+	eng, _ := buildE2EEngineWithOutbound(t, db, "6281234567890", enqueue)
+	sender := &recordingSender{}
+	event := commentEvent(accountIDStr, catalogIDStr, "keep", "buyer_queued")
+
+	if _, err := eng.Run(context.Background(), event, sender, queueGater{"dm-overflow"}); err != nil {
+		t.Fatalf("Engine.Run error: %v", err)
+	}
+
+	if len(sender.privateReplies) != 0 {
+		t.Errorf("gate=Queue: must not send directly; got %d sends", len(sender.privateReplies))
+	}
+	if captures != 1 {
+		t.Fatalf("expected exactly 1 outbound retry enqueued, got %d", captures)
+	}
+	if captured.ReservationID == "" || captured.ReplyText == "" || captured.CommentID != event.ObjectID {
+		t.Errorf("enqueued retry missing context: %+v", captured)
+	}
+}
+
 // TestE2E_GateReject_ReservationStaysReservedUntilExpire verifies that when the
 // gate returns Reject (window expired, dedupe, kill-switch), the outbound is NOT
 // sent and the reservation stays reserved until the expire task fires.
@@ -323,9 +375,9 @@ func TestE2E_GateReject_ReservationStaysReserved(t *testing.T) {
 // trigger the workflow, preventing outbound messages for banned event types.
 func TestRegression_CommentTrigger_OnlyMatchesSourceComment(t *testing.T) {
 	cases := []struct {
-		source    string
-		wantFire  bool
-		section   string
+		source   string
+		wantFire bool
+		section  string
 	}{
 		// ── allowed ──────────────────────────────────────────────────────────────
 		{workflow.SourceComment, true, "SourceComment must trigger seller kit"},
@@ -483,7 +535,7 @@ func TestRegression_NoLiveOrFollowerNodeRegistered(t *testing.T) {
 
 	// Rebuild registry to inspect it directly.
 	reg := workflow.NewRegistry()
-	seller.RegisterNodes(reg, svc, "6281234567890")
+	seller.RegisterNodes(reg, svc, "6281234567890", nil)
 
 	// None of these keys must be registered.
 	bannedKeys := []string{

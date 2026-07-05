@@ -36,11 +36,11 @@ var (
 // stubDB implements the reservationDB interface used by ReservationService.
 // All methods are set as fields so individual tests can customise behaviour.
 type stubDB struct {
-	getProduct           func(ctx context.Context, arg dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error)
-	decrementStock       func(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
-	incrementStock       func(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
-	createReservation    func(ctx context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error)
-	updateResStatus      func(ctx context.Context, arg dbgen.UpdateReservationStatusParams) (dbgen.Reservation, error)
+	getProduct        func(ctx context.Context, arg dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error)
+	decrementStock    func(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
+	incrementStock    func(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
+	createReservation func(ctx context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error)
+	updateResStatus   func(ctx context.Context, arg dbgen.UpdateReservationStatusParams) (dbgen.Reservation, error)
 }
 
 func (s *stubDB) GetProductByPostAndCode(ctx context.Context, arg dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
@@ -91,7 +91,9 @@ func TestReserve_Success(t *testing.T) {
 	var enqueueDelay time.Duration
 
 	db := &stubDB{
-		getProduct:     func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) { return okProduct(), nil },
+		getProduct: func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
+			return okProduct(), nil
+		},
 		decrementStock: func(_ context.Context, _ pgtype.UUID) (dbgen.Product, error) { return okProduct(), nil },
 		createReservation: func(_ context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error) {
 			res := reservedReservation()
@@ -130,7 +132,9 @@ func TestReserve_Success(t *testing.T) {
 
 func TestReserve_OutOfStock(t *testing.T) {
 	db := &stubDB{
-		getProduct:     func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) { return okProduct(), nil },
+		getProduct: func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
+			return okProduct(), nil
+		},
 		decrementStock: func(_ context.Context, _ pgtype.UUID) (dbgen.Product, error) { return dbgen.Product{}, errNoRows },
 	}
 
@@ -158,6 +162,130 @@ func TestReserve_ProductNotFound(t *testing.T) {
 
 	if !errors.Is(err, seller.ErrProductNotFound) {
 		t.Errorf("expected ErrProductNotFound, got %v", err)
+	}
+}
+
+// TestReserve_CreateFails_NoEnqueue verifies MAJOR-3a: when CreateReservation
+// fails, Reserve returns the error and does NOT enqueue an expire timer. In
+// production DecrementStock + CreateReservation share one transaction, so the
+// stock decrement is rolled back too (atomicity guaranteed by NewPgxTxRunner;
+// the in-memory double models only the error propagation + no-enqueue).
+func TestReserve_CreateFails_NoEnqueue(t *testing.T) {
+	errCreate := errors.New("insert failed: connection reset")
+	enqueued := false
+
+	db := &stubDB{
+		getProduct: func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
+			return okProduct(), nil
+		},
+		decrementStock: func(_ context.Context, _ pgtype.UUID) (dbgen.Product, error) { return okProduct(), nil },
+		createReservation: func(_ context.Context, _ dbgen.CreateReservationParams) (dbgen.Reservation, error) {
+			return dbgen.Reservation{}, errCreate
+		},
+	}
+
+	svc := seller.NewReservationService(db, func(_ context.Context, _ string, _ time.Duration) error {
+		enqueued = true
+		return nil
+	})
+
+	_, err := svc.Reserve(context.Background(),
+		testAccountID, testCatalogPostID, "C1",
+		"comment-fail", "user-f", "Fajar", "6281234567890", 0)
+
+	if err == nil {
+		t.Fatal("expected error when CreateReservation fails, got nil")
+	}
+	if !errors.Is(err, errCreate) {
+		t.Errorf("expected wrapped create error, got %v", err)
+	}
+	if enqueued {
+		t.Error("expire timer must NOT be enqueued when reservation creation fails")
+	}
+}
+
+// recordingTxRunner is a TxRunner that models transaction outcome: it commits
+// when fn succeeds and rolls back when fn returns an error, recording which
+// happened. Lets us assert MAJOR-3a atomicity at the seam without a real DB.
+type recordingTxRunner struct {
+	db         seller.ReservationDB
+	committed  bool
+	rolledBack bool
+}
+
+func (r *recordingTxRunner) InTx(ctx context.Context, fn func(q seller.ReservationDB) error) error {
+	if err := fn(r.db); err != nil {
+		r.rolledBack = true
+		return err
+	}
+	r.committed = true
+	return nil
+}
+
+// TestReserve_CreateFails_RollsBack verifies MAJOR-3a atomicity: when
+// CreateReservation fails inside the transaction, the runner rolls back (so the
+// preceding DecrementStock is undone) and never commits.
+func TestReserve_CreateFails_RollsBack(t *testing.T) {
+	decremented := false
+	db := &stubDB{
+		getProduct: func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
+			return okProduct(), nil
+		},
+		decrementStock: func(_ context.Context, _ pgtype.UUID) (dbgen.Product, error) {
+			decremented = true
+			return okProduct(), nil
+		},
+		createReservation: func(_ context.Context, _ dbgen.CreateReservationParams) (dbgen.Reservation, error) {
+			return dbgen.Reservation{}, errors.New("insert failed")
+		},
+	}
+	runner := &recordingTxRunner{db: db}
+	svc := seller.NewReservationServiceTx(db, runner, noopEnqueue)
+
+	_, err := svc.Reserve(context.Background(),
+		testAccountID, testCatalogPostID, "C1",
+		"comment-rb", "user-rb", "Rina", "6281234567890", 0)
+
+	if err == nil {
+		t.Fatal("expected error when CreateReservation fails")
+	}
+	if !decremented {
+		t.Error("DecrementStock should have run inside the transaction")
+	}
+	if !runner.rolledBack {
+		t.Error("transaction must roll back when CreateReservation fails (stock not leaked)")
+	}
+	if runner.committed {
+		t.Error("transaction must NOT commit on failure")
+	}
+}
+
+// TestReserve_Success_Commits verifies the happy path commits the transaction.
+func TestReserve_Success_Commits(t *testing.T) {
+	db := &stubDB{
+		getProduct: func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
+			return okProduct(), nil
+		},
+		decrementStock: func(_ context.Context, _ pgtype.UUID) (dbgen.Product, error) { return okProduct(), nil },
+		createReservation: func(_ context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error) {
+			res := reservedReservation()
+			res.WaLink = arg.WaLink
+			return res, nil
+		},
+	}
+	runner := &recordingTxRunner{db: db}
+	svc := seller.NewReservationServiceTx(db, runner, noopEnqueue)
+
+	if _, err := svc.Reserve(context.Background(),
+		testAccountID, testCatalogPostID, "C1",
+		"comment-ok", "user-ok", "Oki", "6281234567890", 0); err != nil {
+		t.Fatalf("Reserve error: %v", err)
+	}
+	if !runner.committed {
+		t.Error("transaction must commit on success")
+	}
+	if runner.rolledBack {
+		t.Error("transaction must NOT roll back on success")
 	}
 }
 

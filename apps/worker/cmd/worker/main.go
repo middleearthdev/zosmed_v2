@@ -30,6 +30,11 @@ const workerConcurrency = 10
 // account before its 7-day refresh-lead window (see tasks.refreshLeadWindow).
 const tokenRefreshCron = "0 */6 * * *"
 
+// reservationReconcileCron runs the expired-reservation backstop every minute
+// (MAJOR-3b). Frequent because it releases held stock; the default hold is 5
+// minutes, so a 1-minute sweep keeps worst-case over-hold small.
+const reservationReconcileCron = "@every 1m"
+
 func main() {
 	log := platformlog.Logger
 	ctx := context.Background()
@@ -82,11 +87,19 @@ func main() {
 	ingestHandler := tasks.NewCommentIngestHandler(r, log)
 	expireHandler := tasks.NewReservationExpireHandler(r, log)
 	tokenRefreshHandler := tasks.NewTokenRefreshHandler(r.DB, oauthCfg, log)
+	reconcileHandler := tasks.NewReservationReconcileHandler(r.DB, r.Svc, log)
+	outboundHandler := tasks.NewOutboundSendHandler(
+		r.DB, r.Gate, r.Svc,
+		func(token string) tasks.PrivateReplySender { return igapi.New(token) },
+		log,
+	)
 
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(ptasks.TaskCommentIngest, ingestHandler.ProcessTask)
 	mux.HandleFunc(ptasks.TaskReservationExpire, expireHandler.ProcessTask)
 	mux.HandleFunc(ptasks.TaskTokenRefreshSweep, tokenRefreshHandler.ProcessTask)
+	mux.HandleFunc(ptasks.TaskReservationReconcile, reconcileHandler.ProcessTask)
+	mux.HandleFunc(ptasks.TaskOutboundSend, outboundHandler.ProcessTask)
 
 	// ── asynq scheduler (periodic tasks; ADR-002 §5 — first scheduler in the
 	// worker, future periodic tasks e.g. reservation reconcile register onto
@@ -98,6 +111,10 @@ func main() {
 	}
 	if _, err := scheduler.Register(tokenRefreshCron, asynq.NewTask(ptasks.TaskTokenRefreshSweep, nil)); err != nil {
 		log.Error("worker: register token refresh sweep failed", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	if _, err := scheduler.Register(reservationReconcileCron, asynq.NewTask(ptasks.TaskReservationReconcile, nil)); err != nil {
+		log.Error("worker: register reservation reconcile failed", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 
@@ -120,7 +137,10 @@ func main() {
 	}()
 
 	go func() {
-		log.Info("worker: scheduler starting", slog.String("token_refresh_cron", tokenRefreshCron))
+		log.Info("worker: scheduler starting",
+			slog.String("token_refresh_cron", tokenRefreshCron),
+			slog.String("reservation_reconcile_cron", reservationReconcileCron),
+		)
 		if err := scheduler.Run(); err != nil {
 			log.Error("worker: scheduler error", slog.String("error", err.Error()))
 		}

@@ -1,10 +1,37 @@
 package seller
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
+
+// OutboundRetry carries the context needed to re-attempt a private reply that
+// the safety gate deferred (MAJOR-2). The concrete enqueue (asynq) lives in
+// apps/worker/runner so the seller kit stays free of an asynq import.
+type OutboundRetry struct {
+	AccountID     string
+	IgUserID      string
+	CommentID     string
+	TargetUserID  string
+	ReservationID string
+	ReplyText     string
+	PostID        string
+	TriggerKey    string
+	CommentAt     time.Time
+}
+
+// EnqueueOutboundFunc schedules a private-reply retry after delay. Injected into
+// RegisterNodes; nil disables retry (Queue outbound is simply reported deferred).
+type EnqueueOutboundFunc func(ctx context.Context, r OutboundRetry, delay time.Duration) error
+
+// OutboundRetryDelay is how long a deferred private reply waits before the
+// outbound:send handler re-checks the safety gate (MAJOR-2). One minute gives
+// the per-hour DM quota room to recover without holding the reservation too long
+// (default hold is 5 minutes).
+const OutboundRetryDelay = time.Minute
 
 // defaultReplyTemplate is the Indonesian olshop-style private reply template.
 // Used when no custom template is configured (§12 copy — all default text in BI

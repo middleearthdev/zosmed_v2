@@ -114,6 +114,36 @@ func (q *Queries) GetReservation(ctx context.Context, id pgtype.UUID) (Reservati
 	return i, err
 }
 
+const listExpiredActiveReservations = `-- name: ListExpiredActiveReservations :many
+SELECT id FROM reservation
+WHERE status IN ('reserved', 'waiting-pay')
+  AND expires_at < now()
+ORDER BY expires_at
+LIMIT $1
+`
+
+// Backstop sweep (MAJOR-3b): active reservations already past expiry, for the
+// reservation:reconcile task. Uses the partial index reservation_active_expires_at_idx.
+func (q *Queries) ListExpiredActiveReservations(ctx context.Context, lim int32) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listExpiredActiveReservations, lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReservationsByAccount = `-- name: ListReservationsByAccount :many
 SELECT id, account_id, catalog_post_id, product_id, code, ig_comment_id, contact_ig_user_id, contact_handle, status, hold_seconds, reserved_at, expires_at, closed_at, wa_link FROM reservation
 WHERE account_id = $1

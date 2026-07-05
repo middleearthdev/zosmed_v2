@@ -54,3 +54,12 @@ WHERE account_id = @account_id
 ORDER BY reserved_at DESC
 LIMIT @lim
 OFFSET @off;
+
+-- name: ListExpiredActiveReservations :many
+-- Backstop sweep (MAJOR-3b): active reservations already past expiry, for the
+-- reservation:reconcile task. Uses the partial index reservation_active_expires_at_idx.
+SELECT id FROM reservation
+WHERE status IN ('reserved', 'waiting-pay')
+  AND expires_at < now()
+ORDER BY expires_at
+LIMIT @lim;

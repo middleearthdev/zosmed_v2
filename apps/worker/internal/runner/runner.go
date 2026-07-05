@@ -23,6 +23,11 @@ import (
 	"github.com/zosmed/zosmed/libs/workflow"
 )
 
+// outboundMaxRetry caps how many times a deferred private reply (MAJOR-2) is
+// retried by asynq before it is archived. Beyond this the reservation is left
+// to expire (reservation:expire / reservation:reconcile releases the stock).
+const outboundMaxRetry = 5
+
 // CommentToOrderWorkflow is the WorkflowDef for the seller kit comment-to-order
 // flow: comment trigger → reserve stock → private reply with wa.me link.
 var CommentToOrderWorkflow = workflow.WorkflowDef{
@@ -82,10 +87,42 @@ func New(
 		},
 	)
 
-	svc := seller.NewReservationService(db, enqueueExpire)
+	// Reserve runs DecrementStock + CreateReservation in one pgx transaction
+	// (MAJOR-3a) — NewPgxTxRunner rolls back if creation fails so stock never leaks.
+	svc := seller.NewReservationServiceTx(db, seller.NewPgxTxRunner(pool), enqueueExpire)
+
+	// enqueueOutbound schedules a private-reply retry when the safety gate defers
+	// the send (Queue overflow, MAJOR-2). TaskID keeps enqueue idempotent per comment.
+	enqueueOutbound := seller.EnqueueOutboundFunc(
+		func(ctx context.Context, r seller.OutboundRetry, delay time.Duration) error {
+			payload, err := json.Marshal(ptasks.OutboundSendPayload{
+				AccountID:     r.AccountID,
+				IgUserID:      r.IgUserID,
+				CommentID:     r.CommentID,
+				TargetUserID:  r.TargetUserID,
+				ReservationID: r.ReservationID,
+				ReplyText:     r.ReplyText,
+				PostID:        r.PostID,
+				TriggerKey:    r.TriggerKey,
+				CommentAt:     r.CommentAt.Format(time.RFC3339),
+			})
+			if err != nil {
+				return fmt.Errorf("runner: marshal outbound payload: %w", err)
+			}
+			task := asynq.NewTask(ptasks.TaskOutboundSend, payload,
+				asynq.TaskID("outbound:"+r.CommentID), // idempotent: one retry chain per comment
+				asynq.ProcessIn(delay),
+				asynq.MaxRetry(outboundMaxRetry),
+			)
+			if _, err := asynqClient.EnqueueContext(ctx, task); err != nil {
+				return fmt.Errorf("runner: enqueue outbound: %w", err)
+			}
+			return nil
+		},
+	)
 
 	reg := workflow.NewRegistry()
-	seller.RegisterNodes(reg, svc, waPhone)
+	seller.RegisterNodes(reg, svc, waPhone, enqueueOutbound)
 
 	eng := workflow.NewEngine(reg, []workflow.WorkflowDef{CommentToOrderWorkflow})
 

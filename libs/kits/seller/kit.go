@@ -42,10 +42,13 @@ const (
 // RegisterNodes registers all seller kit nodes into reg.
 // Must be called before workflow.NewEngine. Engine does NOT import this package —
 // nodes are injected via the Registry (dependency inversion, §6/§8).
-func RegisterNodes(reg *workflow.Registry, svc *ReservationService, waPhone string) {
+//
+// enqueueOutbound schedules a private-reply retry when the safety gate returns
+// Queue (MAJOR-2); pass nil to disable retry (Queue is reported deferred only).
+func RegisterNodes(reg *workflow.Registry, svc *ReservationService, waPhone string, enqueueOutbound EnqueueOutboundFunc) {
 	reg.RegisterTrigger(NodeKeyCommentTrigger, &commentTrigger{})
 	reg.RegisterAction(NodeKeyReserve, &reserveAction{svc: svc, waPhone: waPhone})
-	reg.RegisterAction(NodeKeyPrivateReply, &privateReplyAction{svc: svc})
+	reg.RegisterAction(NodeKeyPrivateReply, &privateReplyAction{svc: svc, enqueueOutbound: enqueueOutbound})
 }
 
 // ── commentTrigger ────────────────────────────────────────────────────────────
@@ -94,7 +97,7 @@ func (a *reserveAction) Execute(ctx context.Context, rc *workflow.RunContext) (w
 		accountID,
 		catalogPostID,
 		kode,
-		rc.Event.ObjectID,    // IG comment ID
+		rc.Event.ObjectID, // IG comment ID
 		rc.Event.FromID,
 		rc.Event.FromUsername, // {nama} — from webhook payload only (§4b.7)
 		a.waPhone,
@@ -132,7 +135,8 @@ func (a *reserveAction) Execute(ctx context.Context, rc *workflow.RunContext) (w
 //   - Queue  → reservation stays reserved; overflow queue retries later
 //   - Reject → reservation stays reserved until the expire task fires
 type privateReplyAction struct {
-	svc *ReservationService
+	svc             *ReservationService
+	enqueueOutbound EnqueueOutboundFunc
 }
 
 func (a *privateReplyAction) Execute(ctx context.Context, rc *workflow.RunContext) (workflow.ActionResult, error) {
@@ -178,9 +182,30 @@ func (a *privateReplyAction) Execute(ctx context.Context, rc *workflow.RunContex
 		return workflow.ActionResult{Detail: "private reply sent; status=waiting-pay"}, nil
 
 	case workflow.DecisionQueue:
-		// Reservation stays reserved; asynq overflow will retry when quota recovers.
+		// Overflow (§4c): reservation stays reserved and the private reply is
+		// re-queued to send when quota recovers (MAJOR-2). Without an enqueue
+		// func wired, fall back to reporting deferred only.
+		if a.enqueueOutbound == nil {
+			return workflow.ActionResult{
+				Detail: fmt.Sprintf("gate=queue (%s); outbound deferred (no retry wired)", d.Reason),
+			}, nil
+		}
+		retry := OutboundRetry{
+			AccountID:     rc.Event.AccountID,
+			IgUserID:      igUserID,
+			CommentID:     rc.Event.ObjectID,
+			TargetUserID:  rc.Event.FromID,
+			ReservationID: reservationID,
+			ReplyText:     replyText,
+			PostID:        rc.Event.MediaID,
+			TriggerKey:    rc.Event.ObjectID,
+			CommentAt:     rawTime(rc.Event.Raw, RawKeyCommentAt),
+		}
+		if err := a.enqueueOutbound(ctx, retry, OutboundRetryDelay); err != nil {
+			return workflow.ActionResult{}, fmt.Errorf("seller.private-reply: enqueue outbound retry: %w", err)
+		}
 		return workflow.ActionResult{
-			Detail: fmt.Sprintf("gate=queue (%s); outbound deferred", d.Reason),
+			Detail: fmt.Sprintf("gate=queue (%s); outbound retry enqueued", d.Reason),
 		}, nil
 
 	default: // DecisionReject

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
 )
@@ -26,15 +27,59 @@ var (
 	ErrProductNotFound = errors.New("seller: produk tidak ditemukan untuk kode ini")
 )
 
-// reservationDB is the minimal database interface required by ReservationService.
+// ReservationDB is the minimal database interface required by ReservationService.
 // *dbgen.Queries satisfies this interface in production. An in-memory test double
 // is used in unit tests so the state machine can be verified without Postgres.
-type reservationDB interface {
+// Exported so TxRunner implementations (which receive a tx-bound instance) can
+// name it (MAJOR-3a).
+type ReservationDB interface {
 	GetProductByPostAndCode(ctx context.Context, arg dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error)
 	DecrementStock(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
 	IncrementStock(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
 	CreateReservation(ctx context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error)
 	UpdateReservationStatus(ctx context.Context, arg dbgen.UpdateReservationStatusParams) (dbgen.Reservation, error)
+}
+
+// TxRunner runs fn inside a single database transaction, passing a ReservationDB
+// bound to that transaction. On error (or panic) the transaction rolls back
+// (MAJOR-3a: prevents stock leaking when DecrementStock succeeds but the
+// subsequent CreateReservation fails). Production uses NewPgxTxRunner; unit
+// tests use a pass-through runner (no real transaction).
+type TxRunner interface {
+	InTx(ctx context.Context, fn func(q ReservationDB) error) error
+}
+
+// pgxTxRunner is the production TxRunner backed by a pgx connection pool.
+type pgxTxRunner struct{ pool *pgxpool.Pool }
+
+// NewPgxTxRunner returns a TxRunner that opens a real pgx transaction per call.
+func NewPgxTxRunner(pool *pgxpool.Pool) TxRunner { return pgxTxRunner{pool: pool} }
+
+func (r pgxTxRunner) InTx(ctx context.Context, fn func(q ReservationDB) error) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("seller: begin tx: %w", err)
+	}
+	// Rollback is a no-op once Commit has succeeded, so this defer is safe on
+	// the happy path and guarantees rollback on any early return / panic.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := fn(dbgen.New(tx)); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("seller: commit tx: %w", err)
+	}
+	return nil
+}
+
+// sequentialTxRunner runs fn directly against db WITHOUT a real transaction.
+// Used by NewReservationService (unit tests / in-memory double) where atomicity
+// is not modelled; production wires NewPgxTxRunner via NewReservationServiceTx.
+type sequentialTxRunner struct{ db ReservationDB }
+
+func (r sequentialTxRunner) InTx(ctx context.Context, fn func(q ReservationDB) error) error {
+	return fn(r.db)
 }
 
 // EnqueueExpireFunc enqueues a reservation:expire task after the given delay.
@@ -48,14 +93,23 @@ type EnqueueExpireFunc func(ctx context.Context, reservationID string, delay tim
 // All transitions use UpdateReservationStatus with an expected_status guard to
 // prevent lost-update races between concurrent asynq workers.
 type ReservationService struct {
-	db      reservationDB
+	db      ReservationDB
+	tx      TxRunner
 	enqueue EnqueueExpireFunc
 }
 
-// NewReservationService returns a ReservationService backed by db and enqueue.
-// enqueue is called once per successful Reserve to schedule the expiry task.
-func NewReservationService(db reservationDB, enqueue EnqueueExpireFunc) *ReservationService {
-	return &ReservationService{db: db, enqueue: enqueue}
+// NewReservationService returns a ReservationService backed by db and enqueue,
+// using a pass-through (non-transactional) TxRunner. Intended for unit tests
+// with an in-memory double; production must use NewReservationServiceTx so the
+// reserve critical section is atomic (MAJOR-3a).
+func NewReservationService(db ReservationDB, enqueue EnqueueExpireFunc) *ReservationService {
+	return NewReservationServiceTx(db, sequentialTxRunner{db: db}, enqueue)
+}
+
+// NewReservationServiceTx returns a ReservationService whose Reserve wraps
+// DecrementStock + CreateReservation in the transaction provided by tx.
+func NewReservationServiceTx(db ReservationDB, tx TxRunner, enqueue EnqueueExpireFunc) *ReservationService {
+	return &ReservationService{db: db, tx: tx, enqueue: enqueue}
 }
 
 // ReserveResult holds the outcome of a successful Reserve call.
@@ -103,36 +157,47 @@ func (s *ReservationService) Reserve(
 		return ReserveResult{}, fmt.Errorf("seller: get product: %w", err)
 	}
 
-	// Step 2: atomically claim one stock unit; zero rows means out of stock.
-	_, err = s.db.DecrementStock(ctx, product.ID)
-	if isNoRows(err) {
-		return ReserveResult{}, ErrOutOfStock
-	}
-	if err != nil {
-		return ReserveResult{}, fmt.Errorf("seller: decrement stock: %w", err)
-	}
-
 	// Step 3: build wa.me link before persisting.
 	waLink := BuildWaLink(waPhone, fromUsername, code, product.Name)
 
 	now := time.Now()
 	expiresAt := now.Add(time.Duration(holdSeconds) * time.Second)
 
-	// Step 4: persist the reservation.
-	res, err := s.db.CreateReservation(ctx, dbgen.CreateReservationParams{
-		AccountID:       accountID,
-		CatalogPostID:   catalogPostID,
-		ProductID:       product.ID,
-		Code:            code,
-		IgCommentID:     commentID,
-		ContactIgUserID: fromID,
-		ContactHandle:   fromUsername,
-		HoldSeconds:     holdSeconds,
-		ExpiresAt:       pgtype.Timestamptz{Time: expiresAt, Valid: true},
-		WaLink:          waLink,
+	// Steps 2+4 in ONE transaction (MAJOR-3a): claim one stock unit AND persist
+	// the reservation atomically. If CreateReservation fails after DecrementStock,
+	// the whole transaction rolls back so stock is never leaked.
+	var res dbgen.Reservation
+	txErr := s.tx.InTx(ctx, func(q ReservationDB) error {
+		// Atomically claim one stock unit; zero rows means out of stock.
+		if _, e := q.DecrementStock(ctx, product.ID); e != nil {
+			if isNoRows(e) {
+				return ErrOutOfStock
+			}
+			return fmt.Errorf("seller: decrement stock: %w", e)
+		}
+		r, e := q.CreateReservation(ctx, dbgen.CreateReservationParams{
+			AccountID:       accountID,
+			CatalogPostID:   catalogPostID,
+			ProductID:       product.ID,
+			Code:            code,
+			IgCommentID:     commentID,
+			ContactIgUserID: fromID,
+			ContactHandle:   fromUsername,
+			HoldSeconds:     holdSeconds,
+			ExpiresAt:       pgtype.Timestamptz{Time: expiresAt, Valid: true},
+			WaLink:          waLink,
+		})
+		if e != nil {
+			return fmt.Errorf("seller: create reservation: %w", e)
+		}
+		res = r
+		return nil
 	})
-	if err != nil {
-		return ReserveResult{}, fmt.Errorf("seller: create reservation: %w", err)
+	if errors.Is(txErr, ErrOutOfStock) {
+		return ReserveResult{}, ErrOutOfStock
+	}
+	if txErr != nil {
+		return ReserveResult{}, txErr
 	}
 
 	// Step 5: enqueue expiry task. TaskID = reservationID ensures idempotency —
