@@ -1,0 +1,222 @@
+{
+  "info": {
+    "name": "Zosmed API (MVP)",
+    "_postman_id": "b1e7d2a0-0000-4a00-9000-zosmedmvp001",
+    "description": "Koleksi API Zosmed yang sudah dibangun (apps/api).\n\n**Base host:** `graph.instagram.com` (Instagram Login) untuk sisi IG; server internal default di `http://localhost:8080`.\n\n**Envelope respons** (kecuali webhook challenge yang plaintext):\n- Sukses: `{ \"data\": <T>, \"error\": null }`\n- Gagal: `{ \"data\": null, \"error\": { \"code\": \"...\", \"message\": \"...\" } }`\n\n**Auth:** endpoint `/api/v1/*` saat ini memakai `AuthStub` (no-op) untuk MVP — belum perlu token. Webhook & connect bersifat publik (dipanggil Meta), dilindungi verify-token / HMAC / signed-state.\n\nAtur variabel koleksi (`baseUrl`, `accountId`, `postId`, `reservationId`, `igVerifyToken`, `igAppSecret`) di tab Variables sebelum menjalankan.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "accountId", "value": "aaaaaaaa-0000-0000-0000-000000000001", "type": "string" },
+    { "key": "postId", "value": "bbbbbbbb-0000-0000-0000-000000000002", "type": "string" },
+    { "key": "reservationId", "value": "dddddddd-0000-0000-0000-000000000004", "type": "string" },
+    { "key": "igVerifyToken", "value": "my-verify-token", "type": "string" },
+    { "key": "igAppSecret", "value": "my-app-secret", "type": "string" },
+    { "key": "hubChallenge", "value": "challenge-echo-123", "type": "string" },
+    { "key": "hubSignature", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Instagram Login (Connect)",
+      "description": "Business Login for Instagram (ADR-002 §3). Dipakai dari browser, bukan dari Postman untuk alur penuh — tapi endpoint bisa diinspeksi di sini.",
+      "item": [
+        {
+          "name": "Start OAuth (redirect ke Instagram)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/connect/instagram",
+              "host": ["{{baseUrl}}"],
+              "path": ["connect", "instagram"]
+            },
+            "description": "302 redirect ke `https://www.instagram.com/oauth/authorize` dengan scope `instagram_business_*` + signed state (anti-CSRF). Buka URL ini di browser untuk memulai koneksi akun. Postman akan menampilkan header `Location`."
+          },
+          "response": []
+        },
+        {
+          "name": "OAuth Callback",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/connect/instagram/callback?code=THE_CODE_FROM_INSTAGRAM&state=THE_SIGNED_STATE",
+              "host": ["{{baseUrl}}"],
+              "path": ["connect", "instagram", "callback"],
+              "query": [
+                { "key": "code", "value": "THE_CODE_FROM_INSTAGRAM" },
+                { "key": "state", "value": "THE_SIGNED_STATE" }
+              ]
+            },
+            "description": "Dipanggil oleh Instagram setelah user mengizinkan akses. Server memverifikasi `state`, menukar `code` → token pendek → token panjang (~60 hari), memanggil `GET /me` untuk IGSID, menyimpan ke tabel `account`, lalu 302 ke `/settings?connected=1`. `code` & `state` asli hanya berlaku dari alur browser."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Webhooks (Meta)",
+      "description": "Endpoint yang dipanggil Meta (produk Instagram). Tanpa auth aplikasi; verifikasi via verify-token (GET) dan HMAC-SHA256 App Secret (POST).",
+      "item": [
+        {
+          "name": "Webhook Verify Challenge",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/webhooks/meta?hub.mode=subscribe&hub.verify_token={{igVerifyToken}}&hub.challenge={{hubChallenge}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["webhooks", "meta"],
+              "query": [
+                { "key": "hub.mode", "value": "subscribe" },
+                { "key": "hub.verify_token", "value": "{{igVerifyToken}}" },
+                { "key": "hub.challenge", "value": "{{hubChallenge}}" }
+              ]
+            },
+            "description": "Meta memanggil ini saat subscribe. Jika `hub.verify_token` == `IG_VERIFY_TOKEN` server → balas `hub.challenge` sebagai **plaintext 200**. Salah token / mode → 403."
+          },
+          "response": []
+        },
+        {
+          "name": "Webhook Receive (comments)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Hitung X-Hub-Signature-256 = 'sha256=' + HMAC-SHA256(rawBody, IG_APP_SECRET).",
+                  "// PENTING: body harus literal (tanpa {{var}}) agar hash cocok dengan yang dikirim.",
+                  "const secret = pm.collectionVariables.get('igAppSecret');",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.collectionVariables.set('hubSignature', 'sha256=' + hmac);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Hub-Signature-256", "value": "{{hubSignature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"object\": \"instagram\",\n  \"entry\": [\n    {\n      \"id\": \"17841400000000000\",\n      \"time\": 1751709600,\n      \"changes\": [\n        {\n          \"field\": \"comments\",\n          \"value\": {\n            \"id\": \"17800000000000000\",\n            \"text\": \"keep C1 kak, masih ready?\",\n            \"from\": { \"id\": \"9988776655\", \"username\": \"buyer_demo\" },\n            \"media\": { \"id\": \"17900000000000000\" }\n          }\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/webhooks/meta",
+              "host": ["{{baseUrl}}"],
+              "path": ["webhooks", "meta"]
+            },
+            "description": "Event komentar masuk. Server: verifikasi HMAC (403 jika salah) → dedupe → resolusi akun via `entry.id` (IGSID) → filter media di katalog aktif → enqueue `comment:ingest`. Balas `200 {\"data\":{\"received\":true},\"error\":null}`.\n\nPre-request script menghitung signature otomatis dari `igAppSecret`. Ubah `entry.id` / `media.id` agar cocok dengan akun & catalog_post di DB kamu untuk alur end-to-end. Field id komentar toleran `id` ATAU `comment_id`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Comment-to-Order",
+      "description": "Data layar Comment-to-Order (ADR-001 §4.2–§4.4). Group `/api/v1` (AuthStub no-op untuk MVP).",
+      "item": [
+        {
+          "name": "Get Comment-Order (agregat layar)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/comment-order?accountId={{accountId}}&postId={{postId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "comment-order"],
+              "query": [
+                { "key": "accountId", "value": "{{accountId}}" },
+                { "key": "postId", "value": "{{postId}}" }
+              ]
+            },
+            "description": "Satu fetch untuk seluruh panel: `postCommentsLabel`, `comments[]`, `stats[]` (code-detected/reserved-now/closed-wa/expired), `reservations[]`, `products[]`. `accountId` & `postId` = UUID Postgres. 404 `post_not_found` jika post tak ada."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Keyword Settings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/comment-order/settings?accountId={{accountId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "comment-order", "settings"],
+              "query": [
+                { "key": "accountId", "value": "{{accountId}}" }
+              ]
+            },
+            "description": "Ambil pengaturan keyword per akun: `{ keywords[], holdSeconds, replyTemplate }`. Bila belum ada baris → kembalikan default (keyword seller kit)."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Keyword Settings",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"keywords\": [\"keep\", \"C1\", \"C3\", \"mau\"],\n  \"holdSeconds\": 300,\n  \"replyTemplate\": \"Halo kak {nama}! Kode {kode} untuk {produk} sudah dicatat ya \\u2705 Lanjut ke WhatsApp buat closing: {wa_link}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/comment-order/settings?accountId={{accountId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "comment-order", "settings"],
+              "query": [
+                { "key": "accountId", "value": "{{accountId}}" }
+              ]
+            },
+            "description": "Upsert pengaturan. Field kosong diisi default (keywords → seller kit, holdSeconds → 300). Placeholder template: `{nama}`, `{kode}`, `{produk}`, `{wa_link}`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Reservations",
+      "description": "Aksi reservasi (comment-to-order state machine).",
+      "item": [
+        {
+          "name": "Get Reservation (detail)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reservations/{{reservationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "reservations", "{{reservationId}}"]
+            },
+            "description": "Detail satu reservasi: `{ id, code, buyerHandle, product, priceLabel, status, countdownLabel, expiresAt }`. 404 jika tak ditemukan."
+          },
+          "response": []
+        },
+        {
+          "name": "Close Reservation (waiting-pay -> closed-wa)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": ""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reservations/{{reservationId}}/close",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "reservations", "{{reservationId}}", "close"]
+            },
+            "description": "Tandai reservasi sebagai closed (deal lewat WA). Hanya valid dari status `waiting-pay`; selain itu → 409 `invalid_transition`. Body kosong. Mengembalikan `ReservationDTO` terbaru."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
