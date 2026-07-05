@@ -2,11 +2,17 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 /**
- * Coarse route guard (ADR-003 §5.3, AC-10). Only checks whether the `zsid`
- * session cookie is present — it does NOT validate the session against the
- * backend (that would mean a network round-trip on every navigation). Fine-
- * grained checks (session actually valid, onboarding completed) happen in
- * `(app)/layout.tsx` and `app/onboarding/page.tsx` via `getMe()`.
+ * Coarse route guard (ADR-003 §5.3, AC-10). Runs on the edge WITHOUT backend
+ * access, so it can only make the "negative" claim: *no cookie → definitely not
+ * logged in → send to /login*. It must NOT make the "positive" claim (*cookie
+ * present → logged in*), because a present-but-invalid cookie (tampered, expired,
+ * or revoked) can't be detected here — doing so would fight the validated guard
+ * in `(app)/layout.tsx` and cause an infinite redirect loop (ERR_TOO_MANY_REDIRECTS).
+ *
+ * The authoritative check (session actually valid, onboarding complete, and
+ * bouncing an already-logged-in user away from /login) lives server-side in
+ * `(app)/layout.tsx`, `app/onboarding/page.tsx`, and `app/{login,register}/page.tsx`
+ * via `getMe()`, which validates against the backend.
  */
 const SESSION_COOKIE = 'zsid';
 
@@ -28,19 +34,13 @@ const PROTECTED_PATHS = [
   '/onboarding',
 ];
 
-/** Auth pages that should bounce an already-logged-in user to `/dashboard`. */
-const AUTH_PATHS = ['/login', '/register'];
-
 export function middleware(request: NextRequest) {
   const hasSession = request.cookies.has(SESSION_COOKIE);
   const { pathname } = request.nextUrl;
 
-  const isAuthPath = AUTH_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
-  if (isAuthPath) {
-    if (hasSession) return NextResponse.redirect(new URL('/dashboard', request.url));
-    return NextResponse.next();
-  }
-
+  // Only the negative claim: no cookie on a protected path → /login. Bouncing an
+  // already-logged-in user off /login is done in app/{login,register}/page.tsx
+  // (validated via getMe), never here (see file header — avoids redirect loops).
   const isProtected = PROTECTED_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
   if (isProtected && !hasSession) {
     return NextResponse.redirect(new URL('/login', request.url));
@@ -69,9 +69,5 @@ export const config = {
     '/states/:path*',
     '/onboarding',
     '/onboarding/:path*',
-    '/login',
-    '/login/:path*',
-    '/register',
-    '/register/:path*',
   ],
 };

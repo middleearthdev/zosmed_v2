@@ -1,11 +1,18 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import { Logo } from '@zosmed/ui';
+import { getMe } from '@/lib/get-me';
 import { LoginForm } from './LoginForm';
 
 export const metadata: Metadata = { title: 'Masuk — Zosmed' };
 
-export default function LoginPage() {
+export default async function LoginPage() {
+  // Validated bounce (not middleware): only a genuinely valid session goes to the
+  // app. A present-but-invalid cookie falls through and renders the form — no loop.
+  const me = await getMe();
+  if (me) redirect(me.user.onboardingCompleted ? '/dashboard' : '/onboarding');
+
   return (
     <div className="bg-bg text-text flex min-h-screen items-center justify-center p-6">
       <div className="w-full max-w-[380px]">

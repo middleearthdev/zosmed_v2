@@ -1,11 +1,17 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import { Logo } from '@zosmed/ui';
+import { getMe } from '@/lib/get-me';
 import { RegisterForm } from './RegisterForm';
 
 export const metadata: Metadata = { title: 'Daftar — Zosmed' };
 
-export default function RegisterPage() {
+export default async function RegisterPage() {
+  // Validated bounce (see login/page.tsx): a valid session skips register.
+  const me = await getMe();
+  if (me) redirect(me.user.onboardingCompleted ? '/dashboard' : '/onboarding');
+
   return (
     <div className="bg-bg text-text flex min-h-screen items-center justify-center p-6">
       <div className="w-full max-w-[380px]">
