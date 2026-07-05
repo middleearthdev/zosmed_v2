@@ -16,6 +16,33 @@ export interface Account {
   followerCount?: number;
 }
 
+// ── Auth / onboarding (ADR-003) ──────────────────────────────────────────────
+
+/**
+ * Authenticated Zosmed user — distinct from the IG `Account` (ADR-003 §0.2).
+ * `segment` is `null` until chosen in onboarding step 1; `onboardingCompleted`
+ * is stamped only once segment is set AND the IG account is `connected`.
+ */
+export interface AppUser {
+  id: Id;
+  email: string;
+  segment: Segment | null;
+  onboardingCompleted: boolean;
+}
+
+/**
+ * IG account status surfaced by `/auth/me` — never includes token/secret
+ * fields (ADR-003 §4.3). Same shape the FE already passes to
+ * `InstagramConnectStatus`.
+ */
+export type AccountStatus = Pick<Account, 'status' | 'handle' | 'displayName'>;
+
+/** `GET /api/v1/auth/me` response shape (ADR-003 §4.3). */
+export interface MeResponse {
+  user: AppUser;
+  account: AccountStatus | null;
+}
+
 // ── Workflow ────────────────────────────────────────────────────────────────
 
 export type WorkflowStatus = 'draft' | 'live' | 'paused' | 'error';

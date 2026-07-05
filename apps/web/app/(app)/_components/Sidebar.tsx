@@ -1,15 +1,23 @@
 'use client';
 
-import { usePathname } from 'next/navigation';
-import { Logo, Meter } from '@zosmed/ui';
+import { usePathname, useRouter } from 'next/navigation';
+import { I, Logo, Meter } from '@zosmed/ui';
 import type { Account } from '@zosmed/types';
+import { logout } from '@/lib/auth';
 import { SYSTEM_NAV, WORKSPACE_NAV } from './nav';
 import { NavItem } from './NavItem';
 
 export function Sidebar({ account }: { account: Account }) {
   const pathname = usePathname();
+  const router = useRouter();
   const isActive = (href: string) => pathname === href || pathname.startsWith(`${href}/`);
   const initial = account.displayName.charAt(0).toUpperCase();
+
+  async function handleLogout() {
+    await logout();
+    router.push('/login');
+    router.refresh();
+  }
 
   return (
     <aside className="bg-bg border-bg-3 flex w-[232px] flex-shrink-0 flex-col border-r px-3.5 py-5">
@@ -57,6 +65,15 @@ export function Sidebar({ account }: { account: Account }) {
           Upgrade plan
         </button>
       </div>
+
+      <button
+        type="button"
+        onClick={handleLogout}
+        className="text-text-3 hover:text-text mt-3 flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left text-xs transition-colors"
+      >
+        <I.arrow style={{ transform: 'rotate(180deg)' }} />
+        Keluar
+      </button>
     </aside>
   );
 }

@@ -3,7 +3,8 @@
  * Screens consume these functions — swapping mock→real is a local change here
  * (CLAUDE.md §12a SoC). Layar tidak perlu berubah saat backend terhubung.
  */
-import type { Account, CommentOrderResponse, CommentOrderStatDTO, ReservationStatus } from '@zosmed/types';
+import type { Account, ApiEnvelope, CommentOrderResponse, CommentOrderStatDTO, MeResponse, ReservationStatus } from '@zosmed/types';
+import { getMe } from '@/lib/get-me';
 import { mockAccount } from './account';
 import { mockDashboard, type DashboardData } from './dashboard';
 import { mockInbox, type InboxData } from './inbox';
@@ -58,18 +59,15 @@ const DEFAULT_POST_ID = process.env.NEXT_PUBLIC_DEFAULT_POST_ID ?? '';
 /**
  * URL redirect OAuth "Hubungkan Instagram" (`GET /connect/instagram`, backend
  * `apps/api` — migrate-instagram-login.md §3.1/§3.3). Satu sumber dipakai
- * Settings & Onboarding (§12a-1 DRY); tinggal navigasi browser ke sini, backend
- * yang menangani redirect ke `instagram.com/oauth/authorize`.
+ * Settings & Onboarding (§12a-1 DRY).
+ *
+ * Same-origin path (proxied by the Next rewrite, `next.config.ts`) rather than
+ * an absolute URL to `API_BASE` — `/connect/instagram` now requires a logged-in
+ * session (ADR-003 AC-9); the browser only sends the `zsid` cookie when the
+ * navigation stays first-party.
  */
 export function getInstagramConnectUrl(): string {
-  return new URL('/connect/instagram', API_BASE).toString();
-}
-
-// ── Generic envelope (selaras backend Go respond.go) ─────────────────────────
-
-interface ApiEnvelope<T> {
-  data: T | null;
-  error: { code: string; message: string } | null;
+  return '/connect/instagram';
 }
 
 // ── Comment-to-Order adapter (presentational mapping — §12a-3 SoC) ───────────
@@ -158,8 +156,32 @@ function adaptCommentOrderResponse(resp: CommentOrderResponse): CommentOrderData
   };
 }
 
+/**
+ * Bentuk `Account` (dipakai layar non-auth: dashboard, sidebar, settings) dari
+ * `MeResponse` yang sudah nyata (ADR-003) + fallback mock untuk field yang
+ * backend belum expose (`id`, `avatarColor`, `connectedAt`, `followerCount`).
+ * Auth guard-nya sendiri ada di `(app)/layout.tsx` lewat `getMe()` langsung —
+ * fungsi ini murni adaptasi data, tidak pernah redirect (§12a-3 SoC).
+ */
+export function adaptMeToAccount(me: MeResponse): Account {
+  const { user, account } = me;
+  return {
+    ...mockAccount,
+    kit: user.segment ?? mockAccount.kit,
+    status: account?.status ?? 'disconnected',
+    handle: account?.handle ?? mockAccount.handle,
+    displayName: account?.displayName ?? user.email,
+  };
+}
+
+/**
+ * Akun untuk layar non-auth. Coba ambil sesi nyata (`/auth/me`); pakai mock
+ * hanya saat sesi tidak ada/gagal (dev tanpa backend) — layar tetap render
+ * (pola sama `getCommentOrder`).
+ */
 export async function getAccount(): Promise<Account> {
-  return mockAccount;
+  const me = await getMe();
+  return me ? adaptMeToAccount(me) : mockAccount;
 }
 
 export async function getDashboard(): Promise<DashboardData> {

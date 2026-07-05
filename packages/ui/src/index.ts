@@ -17,6 +17,8 @@ export { Card } from './atoms/Card';
 export type { CardProps } from './atoms/Card';
 export { Button } from './atoms/Button';
 export type { ButtonProps } from './atoms/Button';
+export { Input } from './atoms/Input';
+export type { InputProps } from './atoms/Input';
 export { Meter } from './atoms/Meter';
 export type { MeterProps } from './atoms/Meter';
 export { Gauge } from './atoms/Gauge';
