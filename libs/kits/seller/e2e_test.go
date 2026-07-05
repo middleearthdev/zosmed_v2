@@ -18,6 +18,7 @@ import (
 
 	"github.com/zosmed/zosmed/libs/kits/seller"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 	"github.com/zosmed/zosmed/libs/workflow"
 )
 
@@ -140,8 +141,8 @@ func commentEvent(accountID, catalogPostID, code, fromUsername string) workflow.
 // COMPLIANCE AUDIT B: outbound text contains the wa.me link.
 // COMPLIANCE AUDIT C: reservation transitions to waiting-pay after send.
 func TestE2E_HappyPath_CommentToReserveToPrivateReply(t *testing.T) {
-	accountIDStr := seller.UUIDToString(testAccountID)
-	catalogIDStr := seller.UUIDToString(testCatalogPostID)
+	accountIDStr := uuidx.Format(testAccountID)
+	catalogIDStr := uuidx.Format(testCatalogPostID)
 
 	var markWaitingPayCalled bool
 	db := &stubDB{
@@ -228,8 +229,8 @@ func TestE2E_HappyPath_CommentToReserveToPrivateReply(t *testing.T) {
 // Queue (overflow), the outbound is deferred and the reservation stays in reserved
 // state (MarkWaitingPay must NOT be called).
 func TestE2E_GateQueue_ReservationStaysReserved(t *testing.T) {
-	accountIDStr := seller.UUIDToString(testAccountID)
-	catalogIDStr := seller.UUIDToString(testCatalogPostID)
+	accountIDStr := uuidx.Format(testAccountID)
+	catalogIDStr := uuidx.Format(testCatalogPostID)
 
 	var markWaitingPayCalled bool
 	db := &stubDB{
@@ -278,8 +279,8 @@ func TestE2E_GateQueue_ReservationStaysReserved(t *testing.T) {
 // Queue and an enqueueOutbound func is wired, the private reply is re-queued
 // (carrying the reservation + reply context) instead of being dropped.
 func TestE2E_GateQueue_EnqueuesOutboundRetry(t *testing.T) {
-	accountIDStr := seller.UUIDToString(testAccountID)
-	catalogIDStr := seller.UUIDToString(testCatalogPostID)
+	accountIDStr := uuidx.Format(testAccountID)
+	catalogIDStr := uuidx.Format(testCatalogPostID)
 
 	db := &stubDB{
 		getProduct: func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
@@ -324,8 +325,8 @@ func TestE2E_GateQueue_EnqueuesOutboundRetry(t *testing.T) {
 // gate returns Reject (window expired, dedupe, kill-switch), the outbound is NOT
 // sent and the reservation stays reserved until the expire task fires.
 func TestE2E_GateReject_ReservationStaysReserved(t *testing.T) {
-	accountIDStr := seller.UUIDToString(testAccountID)
-	catalogIDStr := seller.UUIDToString(testCatalogPostID)
+	accountIDStr := uuidx.Format(testAccountID)
+	catalogIDStr := uuidx.Format(testCatalogPostID)
 
 	var markWaitingPayCalled bool
 	db := &stubDB{
@@ -395,8 +396,8 @@ func TestRegression_CommentTrigger_OnlyMatchesSourceComment(t *testing.T) {
 		{"", false, "empty source must never trigger"},
 	}
 
-	accountIDStr := seller.UUIDToString(testAccountID)
-	catalogIDStr := seller.UUIDToString(testCatalogPostID)
+	accountIDStr := uuidx.Format(testAccountID)
+	catalogIDStr := uuidx.Format(testCatalogPostID)
 
 	for _, tc := range cases {
 		t.Run(tc.source, func(t *testing.T) {
@@ -452,8 +453,8 @@ func TestRegression_CommentTrigger_OnlyMatchesSourceComment(t *testing.T) {
 // action ALWAYS calls gate.Allow before sending — the gate call must happen even
 // when the gate is configured to reject.
 func TestRegression_AllOutboundViaGate(t *testing.T) {
-	accountIDStr := seller.UUIDToString(testAccountID)
-	catalogIDStr := seller.UUIDToString(testCatalogPostID)
+	accountIDStr := uuidx.Format(testAccountID)
+	catalogIDStr := uuidx.Format(testCatalogPostID)
 
 	var gateCalled bool
 	db := &stubDB{
@@ -560,8 +561,8 @@ func TestRegression_NoLiveOrFollowerNodeRegistered(t *testing.T) {
 // comment" constraint from §4c.  No additional DM may be sent from the seller
 // kit after the private reply for the same comment.
 func TestRegression_OnlyOneOutboundPerComment(t *testing.T) {
-	accountIDStr := seller.UUIDToString(testAccountID)
-	catalogIDStr := seller.UUIDToString(testCatalogPostID)
+	accountIDStr := uuidx.Format(testAccountID)
+	catalogIDStr := uuidx.Format(testCatalogPostID)
 
 	db := &stubDB{
 		getProduct: func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {

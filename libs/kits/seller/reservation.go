@@ -2,7 +2,6 @@ package seller
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 )
 
 // DefaultHoldSeconds is the reservation hold duration when no account-level
@@ -202,7 +202,7 @@ func (s *ReservationService) Reserve(
 
 	// Step 5: enqueue expiry task. TaskID = reservationID ensures idempotency —
 	// only one timer per reservation even on task retry.
-	resID := UUIDToString(res.ID)
+	resID := uuidx.Format(res.ID)
 	if err := s.enqueue(ctx, resID, time.Duration(holdSeconds)*time.Second); err != nil {
 		// Expiry enqueueing failure is non-fatal for the reservation itself, but
 		// the hold may not be auto-released. Return the error so the caller can log.
@@ -217,7 +217,7 @@ func (s *ReservationService) Reserve(
 // Must be called AFTER the private reply has been confirmed sent.
 // Uses UpdateReservationStatus guard (expected=reserved) — race-safe.
 func (s *ReservationService) MarkWaitingPay(ctx context.Context, reservationID string) error {
-	id, err := ParseUUID(reservationID)
+	id, err := uuidx.Parse(reservationID)
 	if err != nil {
 		return fmt.Errorf("seller: MarkWaitingPay: %w", err)
 	}
@@ -240,7 +240,7 @@ func (s *ReservationService) MarkWaitingPay(ctx context.Context, reservationID s
 // Close transitions waiting-pay → closed-wa (terminal success, ADR-001 §2).
 // closed_at is set to now. Stock is NOT returned — item is sold.
 func (s *ReservationService) Close(ctx context.Context, reservationID string) error {
-	id, err := ParseUUID(reservationID)
+	id, err := uuidx.Parse(reservationID)
 	if err != nil {
 		return fmt.Errorf("seller: Close: %w", err)
 	}
@@ -266,7 +266,7 @@ func (s *ReservationService) Close(ctx context.Context, reservationID string) er
 //
 // Stock is returned ONLY when transitioning from a non-terminal state.
 func (s *ReservationService) Expire(ctx context.Context, reservationID string) error {
-	id, err := ParseUUID(reservationID)
+	id, err := uuidx.Parse(reservationID)
 	if err != nil {
 		return fmt.Errorf("seller: Expire: %w", err)
 	}
@@ -310,30 +310,6 @@ func (s *ReservationService) Expire(ctx context.Context, reservationID string) e
 	// Both guards fired → status is already terminal (closed-wa or expired-released).
 	// No-op: this is the correct idempotent behaviour for duplicate expire tasks.
 	return nil
-}
-
-// ── Exported UUID helpers ─────────────────────────────────────────────────────
-
-// ParseUUID parses a hyphenated UUID string (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
-// into a pgtype.UUID. Exported so apps/worker task handlers can use it without
-// re-implementing UUID parsing (DRY §12a-1).
-func ParseUUID(s string) (pgtype.UUID, error) {
-	clean := strings.ReplaceAll(s, "-", "")
-	b, err := hex.DecodeString(clean)
-	if err != nil || len(b) != 16 {
-		return pgtype.UUID{}, fmt.Errorf("seller: invalid UUID %q", s)
-	}
-	var arr [16]byte
-	copy(arr[:], b)
-	return pgtype.UUID{Bytes: arr, Valid: true}, nil
-}
-
-// UUIDToString formats a pgtype.UUID as a lowercase hyphenated UUID string.
-// Exported for use by apps/worker handlers alongside ParseUUID.
-func UUIDToString(u pgtype.UUID) string {
-	b := u.Bytes
-	return fmt.Sprintf("%x-%x-%x-%x-%x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // ── package-private helpers ───────────────────────────────────────────────────

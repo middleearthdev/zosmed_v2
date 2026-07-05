@@ -15,6 +15,7 @@ import (
 	"github.com/zosmed/zosmed/apps/api/internal/httpx"
 	seller "github.com/zosmed/zosmed/libs/kits/seller"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 )
 
 const (
@@ -354,9 +355,14 @@ func mapReservationNoProduct(res dbgen.Reservation) ReservationDTO {
 
 // mapStats converts the aggregate stats row to the four stat tiles.
 // stat key values are the canonical identifiers expected by the FE (§4.2).
+//
+// N9: TotalDetected counts reservations created — i.e. keep codes detected that
+// HAD stock. Keep comments that matched a code but were out of stock create no
+// reservation and are not counted, so the label says "ter-reserve" (reserved),
+// not "terdeteksi" (detected), to avoid overstating detection coverage.
 func mapStats(s dbgen.GetCommentOrderStatsRow) []CommentOrderStatDTO {
 	return []CommentOrderStatDTO{
-		{Key: "code-detected", Label: "Kode terdeteksi", Value: fmt.Sprintf("%d", s.TotalDetected)},
+		{Key: "code-detected", Label: "Kode ter-reserve", Value: fmt.Sprintf("%d", s.TotalDetected)},
 		{Key: "reserved-now", Label: "Reserved sekarang", Value: fmt.Sprintf("%d", s.ReservedNow)},
 		{Key: "closed-wa", Label: "Closed via WA", Value: fmt.Sprintf("%d", s.ClosedWa)},
 		{Key: "expired", Label: "Expired/dilepas", Value: fmt.Sprintf("%d", s.ExpiredReleased)},
@@ -443,7 +449,7 @@ func defaultSettings() SettingsDTO {
 // On parse failure it writes a 400 response and returns false so callers can
 // do an early return.
 func parseUUIDParam(w http.ResponseWriter, raw, paramName string) (pgtype.UUID, bool) {
-	id, err := seller.ParseUUID(raw)
+	id, err := uuidx.Parse(raw)
 	if err != nil {
 		httpx.Err(w, http.StatusBadRequest, "invalid_param",
 			fmt.Sprintf("invalid UUID for param %q: %s", paramName, raw))
@@ -455,7 +461,7 @@ func parseUUIDParam(w http.ResponseWriter, raw, paramName string) (pgtype.UUID, 
 // uuidToString formats a pgtype.UUID as a lowercase hyphenated UUID string.
 // Uses seller.UUIDToString (single source for UUID formatting — §12a-1).
 func uuidToString(u pgtype.UUID) string {
-	return seller.UUIDToString(u)
+	return uuidx.Format(u)
 }
 
 // ── DB error helpers ──────────────────────────────────────────────────────────

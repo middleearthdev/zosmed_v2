@@ -11,6 +11,7 @@ import (
 
 	"github.com/zosmed/zosmed/libs/kits/seller"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 )
 
 // ── In-memory test double ─────────────────────────────────────────────────────
@@ -19,7 +20,7 @@ import (
 var errNoRows = errors.New("no rows in result set")
 
 func mustUUID(s string) pgtype.UUID {
-	u, err := seller.ParseUUID(s)
+	u, err := uuidx.Parse(s)
 	if err != nil {
 		panic(fmt.Sprintf("mustUUID(%q): %v", s, err))
 	}
@@ -304,7 +305,7 @@ func TestMarkWaitingPay_ReservedToWaitingPay(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	resIDStr := seller.UUIDToString(testReservationID)
+	resIDStr := uuidx.Format(testReservationID)
 
 	if err := svc.MarkWaitingPay(context.Background(), resIDStr); err != nil {
 		t.Fatalf("MarkWaitingPay error: %v", err)
@@ -326,7 +327,7 @@ func TestMarkWaitingPay_NoOpWhenGuardFires(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	if err := svc.MarkWaitingPay(context.Background(), seller.UUIDToString(testReservationID)); err != nil {
+	if err := svc.MarkWaitingPay(context.Background(), uuidx.Format(testReservationID)); err != nil {
 		t.Errorf("expected no-op, got error: %v", err)
 	}
 }
@@ -346,7 +347,7 @@ func TestClose_WaitingPayToClosedWa(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	if err := svc.Close(context.Background(), seller.UUIDToString(testReservationID)); err != nil {
+	if err := svc.Close(context.Background(), uuidx.Format(testReservationID)); err != nil {
 		t.Fatalf("Close error: %v", err)
 	}
 	if calledWith.NewStatus != dbgen.ReservationStatusClosedWa {
@@ -383,7 +384,7 @@ func TestExpire_FromReserved(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	if err := svc.Expire(context.Background(), seller.UUIDToString(testReservationID)); err != nil {
+	if err := svc.Expire(context.Background(), uuidx.Format(testReservationID)); err != nil {
 		t.Fatalf("Expire error: %v", err)
 	}
 	if !incrementCalled {
@@ -419,7 +420,7 @@ func TestExpire_FromWaitingPay(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	if err := svc.Expire(context.Background(), seller.UUIDToString(testReservationID)); err != nil {
+	if err := svc.Expire(context.Background(), uuidx.Format(testReservationID)); err != nil {
 		t.Fatalf("Expire error: %v", err)
 	}
 	if !incrementCalled {
@@ -447,7 +448,7 @@ func TestExpire_NoOpWhenAlreadyTerminal(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	if err := svc.Expire(context.Background(), seller.UUIDToString(testReservationID)); err != nil {
+	if err := svc.Expire(context.Background(), uuidx.Format(testReservationID)); err != nil {
 		t.Fatalf("Expire no-op should not error, got: %v", err)
 	}
 	if incrementCalled {
@@ -458,25 +459,4 @@ func TestExpire_NoOpWhenAlreadyTerminal(t *testing.T) {
 	}
 }
 
-// ── ParseUUID / UUIDToString round-trip ──────────────────────────────────────
-
-func TestParseUUID_RoundTrip(t *testing.T) {
-	original := "aaaabbbb-cccc-dddd-eeee-ffffffffffff"
-	u, err := seller.ParseUUID(original)
-	if err != nil {
-		t.Fatalf("ParseUUID error: %v", err)
-	}
-	back := seller.UUIDToString(u)
-	if back != original {
-		t.Errorf("UUIDToString(ParseUUID(%q)) = %q, want original", original, back)
-	}
-}
-
-func TestParseUUID_InvalidInput(t *testing.T) {
-	cases := []string{"", "not-a-uuid", "gggggggg-0000-0000-0000-000000000000"}
-	for _, s := range cases {
-		if _, err := seller.ParseUUID(s); err == nil {
-			t.Errorf("ParseUUID(%q) expected error, got nil", s)
-		}
-	}
-}
+// UUID parse/format round-trip is covered by libs/platform/uuidx (M5).

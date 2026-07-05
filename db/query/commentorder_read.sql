@@ -4,7 +4,9 @@
 
 -- name: GetCommentOrderStats :one
 -- Counts by reservation status for the stats row (CommentOrderStatDTO).
--- total_detected = total reservations ever created for this post (code-detected).
+-- total_detected = total reservations ever created for this post = keep codes
+-- detected THAT HAD STOCK. Out-of-stock keep comments create no reservation and
+-- are not counted here (N9) — the FE tile is labelled "ter-reserve", not "detected".
 SELECT
     COUNT(*)                                                        AS total_detected,
     COUNT(*) FILTER (WHERE status = 'reserved')                    AS reserved_now,

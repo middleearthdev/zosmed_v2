@@ -7,8 +7,7 @@ import (
 
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgtype"
-
-	seller "github.com/zosmed/zosmed/libs/kits/seller"
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 )
 
 // reconcileBatchLimit bounds how many expired reservations one sweep processes,
@@ -55,7 +54,7 @@ func (h *ReservationReconcileHandler) ProcessTask(ctx context.Context, _ *asynq.
 
 	released := 0
 	for _, id := range ids {
-		idStr := seller.UUIDToString(id)
+		idStr := uuidx.Format(id)
 		// Expire is idempotent: releases stock + transitions to expired-released,
 		// and no-ops if the row is already terminal. Failure of one reservation
 		// must not abort the whole sweep.

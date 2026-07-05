@@ -10,9 +10,9 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	seller "github.com/zosmed/zosmed/libs/kits/seller"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
 	ptasks "github.com/zosmed/zosmed/libs/platform/tasks"
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 	"github.com/zosmed/zosmed/libs/workflow"
 )
 
@@ -73,7 +73,7 @@ func (h *OutboundSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) er
 		slog.String("reservation_id", p.ReservationID),
 	)
 
-	accountID, err := seller.ParseUUID(p.AccountID)
+	accountID, err := uuidx.Parse(p.AccountID)
 	if err != nil {
 		return fmt.Errorf("outbound_send: parse account_id %q: %w", p.AccountID, err)
 	}
@@ -95,7 +95,7 @@ func (h *OutboundSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) er
 	// Guard: only retry while the reservation is still in `reserved`. If it has
 	// already moved to waiting-pay/terminal (a prior attempt succeeded, or it
 	// expired), do NOT send — this prevents a duplicate private reply.
-	resID, err := seller.ParseUUID(p.ReservationID)
+	resID, err := uuidx.Parse(p.ReservationID)
 	if err != nil {
 		return fmt.Errorf("outbound_send: parse reservation_id %q: %w", p.ReservationID, err)
 	}

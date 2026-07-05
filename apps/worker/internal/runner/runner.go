@@ -140,9 +140,9 @@ func New(
 // ── gateAdapter ───────────────────────────────────────────────────────────────
 
 // gateAdapter adapts safety.Gate (libs/safety) to workflow.Gater (libs/workflow).
-// Both OutboundReq types have identical fields; DecisionAction int values are
-// cast directly since they are defined with the same iota ordering.
-// This is the ~15-line adapter described in the spec (ADR-001 §3.3).
+// Both OutboundReq types have identical fields; the verdict enums are mapped
+// explicitly (M6) rather than cast, so the two packages' iota orderings can
+// drift independently without silently mis-mapping a decision.
 type gateAdapter struct {
 	g safety.Gate
 }
@@ -161,8 +161,20 @@ func (a *gateAdapter) Allow(ctx context.Context, req workflow.OutboundReq) (work
 	if err != nil {
 		return workflow.Decision{}, err
 	}
-	return workflow.Decision{
-		Action: workflow.DecisionAction(d.Action), // same iota: Allow=0, Queue=1, Reject=2
-		Reason: d.Reason,
-	}, nil
+	return workflow.Decision{Action: mapDecisionAction(d.Action), Reason: d.Reason}, nil
+}
+
+// mapDecisionAction maps a safety verdict to the workflow enum explicitly. An
+// unknown value fails safe to DecisionReject (never send on an unrecognised verdict).
+func mapDecisionAction(a safety.Action) workflow.DecisionAction {
+	switch a {
+	case safety.Allow:
+		return workflow.DecisionAllow
+	case safety.Queue:
+		return workflow.DecisionQueue
+	case safety.Reject:
+		return workflow.DecisionReject
+	default:
+		return workflow.DecisionReject
+	}
 }

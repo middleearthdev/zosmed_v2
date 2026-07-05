@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 	"github.com/zosmed/zosmed/libs/workflow"
 )
 
@@ -84,11 +85,11 @@ func (a *reserveAction) Execute(ctx context.Context, rc *workflow.RunContext) (w
 	holdSeconds := rawInt32(rc.Event.Raw, RawKeyHoldSeconds)
 	igUserID := rawString(rc.Event.Raw, RawKeyIgUserID)
 
-	accountID, err := ParseUUID(rc.Event.AccountID)
+	accountID, err := uuidx.Parse(rc.Event.AccountID)
 	if err != nil {
 		return workflow.ActionResult{}, fmt.Errorf("seller.reserve: parse account_id: %w", err)
 	}
-	catalogPostID, err := ParseUUID(catalogPostIDStr)
+	catalogPostID, err := uuidx.Parse(catalogPostIDStr)
 	if err != nil {
 		return workflow.ActionResult{}, fmt.Errorf("seller.reserve: parse catalog_post_id: %w", err)
 	}
@@ -107,7 +108,7 @@ func (a *reserveAction) Execute(ctx context.Context, rc *workflow.RunContext) (w
 		return workflow.ActionResult{}, fmt.Errorf("seller.reserve: %w", err)
 	}
 
-	resIDStr := UUIDToString(result.Reservation.ID)
+	resIDStr := uuidx.Format(result.Reservation.ID)
 
 	// Populate Vars for the private-reply action.
 	rc.Vars[varReservationID] = resIDStr

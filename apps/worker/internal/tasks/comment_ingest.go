@@ -17,6 +17,7 @@ import (
 	seller "github.com/zosmed/zosmed/libs/kits/seller"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
 	ptasks "github.com/zosmed/zosmed/libs/platform/tasks"
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 	"github.com/zosmed/zosmed/libs/workflow"
 )
 
@@ -67,7 +68,7 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 	}
 
 	// Parse AccountID from string to pgtype.UUID.
-	accountID, err := seller.ParseUUID(p.AccountID)
+	accountID, err := uuidx.Parse(p.AccountID)
 	if err != nil {
 		return fmt.Errorf("comment_ingest: parse account_id %q: %w", p.AccountID, err)
 	}
@@ -130,7 +131,7 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 		FromUsername: p.FromUsername,
 		Text:         p.Text,
 		Raw: map[string]any{
-			seller.RawKeyCatalogPostID: seller.UUIDToString(catalogPost.ID),
+			seller.RawKeyCatalogPostID: uuidx.Format(catalogPost.ID),
 			seller.RawKeyKode:          code,
 			seller.RawKeyHoldSeconds:   holdSeconds,
 			seller.RawKeyIgUserID:      account.IgUserID,

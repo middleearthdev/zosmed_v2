@@ -6,8 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
-
-	seller "github.com/zosmed/zosmed/libs/kits/seller"
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 )
 
 // fakeLister is an in-memory expiredReservationLister.
@@ -56,7 +55,7 @@ func TestReconcile_OneFailureDoesNotAbortSweep(t *testing.T) {
 	id1, id2, id3 := uuidWithByte(1), uuidWithByte(2), uuidWithByte(3)
 	lister := &fakeLister{ids: []pgtype.UUID{id1, id2, id3}}
 	// Middle reservation fails — the other two must still be attempted.
-	expirer := &fakeExpirer{failFor: map[string]error{seller.UUIDToString(id2): errors.New("boom")}}
+	expirer := &fakeExpirer{failFor: map[string]error{uuidx.Format(id2): errors.New("boom")}}
 	h := NewReservationReconcileHandler(lister, expirer, silentLogger())
 
 	if err := h.ProcessTask(context.Background(), nil); err != nil {

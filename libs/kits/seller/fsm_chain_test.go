@@ -21,6 +21,7 @@ import (
 
 	"github.com/zosmed/zosmed/libs/kits/seller"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
+	"github.com/zosmed/zosmed/libs/platform/uuidx"
 )
 
 // ── Full chain: reserved → waiting-pay → closed-wa ───────────────────────────
@@ -60,7 +61,7 @@ func TestFSM_FullChain_ReservedToWaitingPayToClosedWa(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	resIDStr := seller.UUIDToString(testReservationID)
+	resIDStr := uuidx.Format(testReservationID)
 
 	// Step 1: Reserve → status = reserved.
 	result, err := svc.Reserve(context.Background(),
@@ -118,7 +119,7 @@ func TestFSM_CloseAfterExpired_IsNoOp(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	err := svc.Close(context.Background(), seller.UUIDToString(testReservationID))
+	err := svc.Close(context.Background(), uuidx.Format(testReservationID))
 	if err != nil {
 		t.Errorf("Close after expired: expected no-op (nil error), got: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestFSM_Expire_AlreadyClosedWa_IsNoOp(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	if err := svc.Expire(context.Background(), seller.UUIDToString(testReservationID)); err != nil {
+	if err := svc.Expire(context.Background(), uuidx.Format(testReservationID)); err != nil {
 		t.Fatalf("Expire (already closed-wa): expected no-op, got: %v", err)
 	}
 	if incrementCalled {
@@ -294,7 +295,7 @@ func TestFSM_ConcurrentExpire_OnlyOneIncrements(t *testing.T) {
 	}
 
 	svc := seller.NewReservationService(db, noopEnqueue)
-	resIDStr := seller.UUIDToString(testReservationID)
+	resIDStr := uuidx.Format(testReservationID)
 
 	var wg sync.WaitGroup
 	var errs [2]error
