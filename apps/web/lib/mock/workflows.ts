@@ -1,5 +1,13 @@
 import type { IconName } from '@zosmed/ui';
 
+/**
+ * Shared view-model types for the workflow canvas (Palette / FlowCanvas /
+ * InspectorCanvas). These are consumed with REAL data (mapped in
+ * `lib/workflow-catalog.ts`, ADR-004 F4/F7) for the connected builder, and
+ * with mock data (below + `mockInspector`) for the standalone
+ * `/workflows/inspector` demo screen that iteration keeps untouched.
+ */
+
 // ── Node colors (CLAUDE.md §7 catalog) ───────────────────────────────────────
 export type WfNodeType = 'TRIGGER' | 'FILTER' | 'ACTION' | 'AI' | 'OUTPUT';
 
@@ -11,10 +19,14 @@ export const NODE_COLORS: Record<WfNodeType, string> = {
   OUTPUT: 'var(--zz-lime)',
 };
 
-// ── Builder ──────────────────────────────────────────────────────────────────
+// ── Builder view-model ───────────────────────────────────────────────────────
 export interface PaletteItem {
   iconKey: IconName;
   label: string;
+  /** node_type from the feasible catalog (`NODE_CATALOG`, `@zosmed/types`). */
+  nodeType: string;
+  /** false = palette-only, badge "segera" (R6 — not runnable this iteration). */
+  runnable: boolean;
 }
 export interface PaletteSection {
   title: string;
@@ -38,170 +50,8 @@ export interface FlowLink {
   to: string;
   active?: boolean;
 }
-export interface BuilderData {
-  name: string;
-  status: string;
-  meta: string;
-  runs: string;
-  errorRate: string;
-  palette: PaletteSection[];
-  nodes: FlowNode[];
-  links: FlowLink[];
-}
 
-export const mockBuilder: BuilderData = {
-  name: 'promo-launch-mei',
-  status: '● RUNNING',
-  meta: 'last edited 14m ago by maya',
-  runs: '847 runs',
-  errorRate: 'error rate 0.4%',
-  palette: [
-    {
-      title: 'TRIGGERS',
-      color: 'var(--zz-lime)',
-      items: [
-        { iconKey: 'bolt', label: 'IG Comment received' },
-        { iconKey: 'inbox', label: 'IG DM received' },
-        { iconKey: 'heart', label: 'Story reply' },
-        { iconKey: 'sparkle', label: 'Story mention' },
-        { iconKey: 'box', label: 'Comment-to-order (post/Reel)' },
-        { iconKey: 'bolt', label: 'Click-to-DM ad' },
-      ],
-    },
-    {
-      title: 'FILTERS',
-      color: 'var(--zz-warn)',
-      items: [
-        { iconKey: 'filter', label: 'Keyword match' },
-        { iconKey: 'chat', label: 'Conversation state' },
-        { iconKey: 'shield', label: 'Intent: ragu / trust' },
-        { iconKey: 'filter', label: 'Post selection' },
-        { iconKey: 'cog', label: 'Time window' },
-      ],
-    },
-    {
-      title: 'ACTIONS',
-      color: 'var(--zz-pink)',
-      items: [
-        { iconKey: 'chat', label: 'Reply comment' },
-        { iconKey: 'send', label: 'Send DM' },
-        { iconKey: 'ai', label: 'AI reply (olshop)' },
-        { iconKey: 'whatsapp', label: 'Kirim link WhatsApp' },
-        { iconKey: 'shield', label: 'Kirim trust-kit' },
-        { iconKey: 'box', label: 'Reserve stok (comment-to-order)' },
-        { iconKey: 'bell', label: 'Notify opt-in' },
-        { iconKey: 'user', label: 'Hand-off to human' },
-        { iconKey: 'check', label: 'Tag contact' },
-      ],
-    },
-  ],
-  nodes: [
-    { id: 'n1', x: 60, y: 220, type: 'TRIGGER', title: 'IG Comment received', sub: 'Post: promo-launch-mei', badge: '847 fired', iconKey: 'bolt' },
-    { id: 'n2', x: 360, y: 100, type: 'FILTER', title: 'Keyword: "info" / "harga"', sub: 'includes · case insensitive', badge: '612 pass · 235 skip', iconKey: 'filter' },
-    { id: 'n3', x: 360, y: 360, type: 'FILTER', title: 'Conversation state', sub: 'within 24h window', badge: '418 pass · 194 skip', iconKey: 'chat' },
-    { id: 'n4', x: 680, y: 60, type: 'ACTION', title: 'Reply Comment', sub: '"Cek DM ya 👀✨"', badge: '612 sent · 0.4% err', iconKey: 'chat', selected: true },
-    { id: 'n5', x: 680, y: 200, type: 'ACTION', title: 'Send DM', sub: 'template + product link', badge: '578 sent', iconKey: 'send', focus: true },
-    { id: 'n6', x: 680, y: 380, type: 'ACTION', title: 'Hand-off to human', sub: 'if refund / complaint', badge: '178 routed', iconKey: 'user' },
-    { id: 'n7', x: 1000, y: 130, type: 'AI', title: 'AI Follow-up', sub: 'gpt-4o-mini · brand tone', badge: '247 conversations', iconKey: 'ai' },
-    { id: 'n8', x: 1000, y: 320, type: 'OUTPUT', title: 'Tag → warm-lead', sub: 'add to segment', badge: '178 tagged', iconKey: 'check' },
-  ],
-  links: [
-    { from: 'n1', to: 'n2' },
-    { from: 'n1', to: 'n3' },
-    { from: 'n2', to: 'n4' },
-    { from: 'n2', to: 'n5', active: true },
-    { from: 'n3', to: 'n6' },
-    { from: 'n5', to: 'n7', active: true },
-    { from: 'n4', to: 'n8' },
-    { from: 'n6', to: 'n8' },
-  ],
-};
-
-// ── Runs ─────────────────────────────────────────────────────────────────────
-export type RunStatusKey = 'success' | 'failed' | 'review';
-export interface RunRow {
-  id: string;
-  t: string;
-  wf: string;
-  trig: string;
-  dur: string;
-  steps: string;
-  status: RunStatusKey;
-}
-export interface RunRateBar {
-  success: number;
-  review: number;
-  failed: number;
-}
-export interface RunStep {
-  k: WfNodeType;
-  l: string;
-  d: string;
-  dur: string;
-  payload: string;
-  color: string;
-}
-export interface RunsData {
-  kpis: { label: string; value: string; delta: string; color: string }[];
-  runRate: RunRateBar[];
-  runs: RunRow[];
-  detail: {
-    id: string;
-    facts: [string, string][];
-    steps: RunStep[];
-  };
-}
-
-// Deterministic run-rate bars (no Math.random — SSR-safe).
-const runRate: RunRateBar[] = Array.from({ length: 48 }, (_, i) => ({
-  success: Math.round(18 + Math.sin(i * 0.4) * 10 + ((i * 7) % 9)),
-  review: i % 7 === 3 ? 3 : 0,
-  failed: i % 11 === 5 ? 2 : 0,
-}));
-
-export const mockRuns: RunsData = {
-  kpis: [
-    { label: 'RUNS · 24H', value: '1,284', delta: '+18%', color: 'var(--zz-lime)' },
-    { label: 'SUCCESS RATE', value: '97.4%', delta: '+0.3pt', color: 'var(--zz-lime)' },
-    { label: 'AVG DURATION', value: '3.4s', delta: '−0.2s', color: 'var(--zz-lime)' },
-    { label: 'ERRORS · 24H', value: '34', delta: '+12', color: 'var(--zz-pink)' },
-    { label: 'NEED REVIEW', value: '8', delta: '+3', color: 'var(--zz-warn)' },
-  ],
-  runRate,
-  runs: [
-    { id: 'run_8821', t: '14:32:08', wf: 'launch-promo-mei', trig: 'comment by @rina_susanti', dur: '3.2s', steps: '6/6', status: 'success' },
-    { id: 'run_8820', t: '14:31:54', wf: 'launch-promo-mei', trig: 'comment by @arief.daud', dur: '4.1s', steps: '6/6', status: 'success' },
-    { id: 'run_8819', t: '14:31:12', wf: 'faq-bot-default', trig: 'dm by @sintia.f', dur: '2.7s', steps: '4/4', status: 'success' },
-    { id: 'run_8818', t: '14:30:48', wf: 'launch-promo-mei', trig: 'comment by @putu.gita', dur: '6.4s', steps: '4/6', status: 'failed' },
-    { id: 'run_8817', t: '14:30:22', wf: 'giveaway-buku', trig: 'comment by @mira.hidayah', dur: '1.8s', steps: '5/5', status: 'success' },
-    { id: 'run_8816', t: '14:29:51', wf: 'launch-promo-mei', trig: 'comment by @budi.s', dur: '3.4s', steps: '6/6', status: 'success' },
-    { id: 'run_8815', t: '14:29:18', wf: 'win-back-juni', trig: 'schedule daily', dur: '12.4s', steps: '8/8', status: 'success' },
-    { id: 'run_8814', t: '14:28:42', wf: 'faq-bot-default', trig: 'dm by @nadya.p', dur: '5.1s', steps: '4/4', status: 'review' },
-    { id: 'run_8813', t: '14:28:11', wf: 'launch-promo-mei', trig: 'comment by @lely.r', dur: '2.9s', steps: '6/6', status: 'success' },
-    { id: 'run_8812', t: '14:27:54', wf: 'faq-bot-default', trig: 'dm by @rizky_p', dur: '2.2s', steps: '4/4', status: 'success' },
-  ],
-  detail: {
-    id: 'run_8821',
-    facts: [
-      ['Trigger', '@rina_susanti'],
-      ['Started', '14:32:08'],
-      ['Duration', '3.2s'],
-      ['Tokens', '184'],
-      ['Cost', '$0.0042'],
-      ['Result', '+1 lead'],
-    ],
-    steps: [
-      { k: 'TRIGGER', l: 'Comment received', d: '+0.0s', dur: '12ms', payload: '"info dong sis"', color: 'var(--zz-lime)' },
-      { k: 'FILTER', l: 'Keyword "info" matched', d: '+0.1s', dur: '8ms', payload: 'matched: ["info","price","harga"]', color: 'var(--zz-warn)' },
-      { k: 'ACTION', l: 'Reply public comment', d: '+0.5s', dur: '320ms', payload: '"Cek DM ya kak 💚"', color: 'var(--zz-pink)' },
-      { k: 'ACTION', l: 'Send DM template', d: '+1.1s', dur: '480ms', payload: 'tpl: launch-promo-mei-v3', color: 'var(--zz-pink)' },
-      { k: 'AI', l: 'AI follow-up generated', d: '+2.4s', dur: '1240ms', payload: 'intent: ask_link · 184 tok', color: 'var(--zz-blue)' },
-      { k: 'OUTPUT', l: 'Lead captured · warm', d: '+3.2s', dur: '24ms', payload: 'tagged: warm-lead, jakarta', color: 'var(--zz-lime)' },
-    ],
-  },
-};
-
-// ── Inspector (deep editor state) ────────────────────────────────────────────
+// ── Inspector (deep editor demo screen, `/workflows/inspector`) ─────────────
 export interface InspectorNode {
   id: string;
   x: number;

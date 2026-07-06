@@ -1,20 +1,26 @@
-import type { RunRateBar } from '@/lib/mock/workflows';
+/** One hourly bucket of run outcomes — status set matches `RunStatus` (`success`/`failed`/`skipped`, ADR-004 §2.4). */
+export interface RunRateBar {
+  success: number;
+  skipped: number;
+  failed: number;
+}
 
-/** Stacked run-rate bars over 24h (success / review / failed). SSR-safe — data is precomputed. */
+/** Stacked run-rate bars over 24h (success / skipped / failed). SSR-safe — data is precomputed by the caller. */
 export function RunRateChart({ bars }: { bars: RunRateBar[] }) {
   const baseline = 130;
+  const slotWidth = 1240 / Math.max(bars.length, 1);
   return (
     <svg viewBox="0 0 1240 140" width="100%" height="140">
       {bars.map((b, i) => {
-        const x = 8 + i * 25.6;
+        const x = 8 + i * slotWidth;
         return (
           <g key={i}>
             <rect x={x} y={baseline - b.success} width={18} height={b.success} fill="var(--zz-lime)" rx={1} />
-            {b.review > 0 ? (
-              <rect x={x} y={baseline - b.success - b.review} width={18} height={b.review} fill="var(--zz-warn)" rx={1} />
+            {b.skipped > 0 ? (
+              <rect x={x} y={baseline - b.success - b.skipped} width={18} height={b.skipped} fill="var(--zz-warn)" rx={1} />
             ) : null}
             {b.failed > 0 ? (
-              <rect x={x} y={baseline - b.success - b.review - b.failed} width={18} height={b.failed} fill="var(--zz-pink)" rx={1} />
+              <rect x={x} y={baseline - b.success - b.skipped - b.failed} width={18} height={b.failed} fill="var(--zz-pink)" rx={1} />
             ) : null}
           </g>
         );

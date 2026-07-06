@@ -22,12 +22,8 @@ import {
   type DrilldownData,
 } from './analytics';
 import {
-  mockBuilder,
-  mockRuns,
   mockInspector,
   mockCommentOrder,
-  type BuilderData,
-  type RunsData,
   type InspectorData,
   type CommentOrderData,
   type IncomingComment,
@@ -206,14 +202,6 @@ export async function getAnalytics(): Promise<AnalyticsData> {
 
 export async function getAnalyticsDrilldown(workflowId: string): Promise<DrilldownData | undefined> {
   return getDrilldownByWorkflowId(workflowId);
-}
-
-export async function getWorkflowBuilder(): Promise<BuilderData> {
-  return mockBuilder;
-}
-
-export async function getWorkflowRuns(): Promise<RunsData> {
-  return mockRuns;
 }
 
 export async function getWorkflowInspector(): Promise<InspectorData> {

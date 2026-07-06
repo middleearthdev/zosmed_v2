@@ -4,8 +4,22 @@ import { NODE_COLORS, type FlowLink, type FlowNode } from '@/lib/mock/workflows'
 const NW = 220;
 const NH = 84;
 
-/** Static port of the design BigFlow node graph (SVG bezier links + node cards). */
-export function FlowCanvas({ nodes, links }: { nodes: FlowNode[]; links: FlowLink[] }) {
+/**
+ * Node graph canvas (SVG bezier links + node cards). Ported from the design
+ * BigFlow layout; now click-to-select is wired (`onSelectNode`) so the
+ * builder's inspector panel can edit the selected node's config (F4/F5).
+ * Manual drag-repositioning / edge rewiring is out of scope this iteration
+ * (ADR-004 §0 Non-Scope) — nodes are auto-laid-out and auto-wired on add.
+ */
+export function FlowCanvas({
+  nodes,
+  links,
+  onSelectNode,
+}: {
+  nodes: FlowNode[];
+  links: FlowLink[];
+  onSelectNode?: (id: string) => void;
+}) {
   const byId = (id: string) => nodes.find((n) => n.id === id);
 
   return (
@@ -52,13 +66,20 @@ export function FlowCanvas({ nodes, links }: { nodes: FlowNode[]; links: FlowLin
         return (
           <div
             key={n.id}
+            role={onSelectNode ? 'button' : undefined}
+            tabIndex={onSelectNode ? 0 : undefined}
+            onClick={() => onSelectNode?.(n.id)}
+            onKeyDown={(e) => {
+              if (onSelectNode && (e.key === 'Enter' || e.key === ' ')) onSelectNode(n.id);
+            }}
             className="bg-bg-2 absolute overflow-hidden rounded-[10px]"
             style={{
               left: n.x,
               top: n.y,
               width: NW,
               border: `1px solid ${border}`,
-              boxShadow: n.focus ? `0 0 0 3px color-mix(in oklch, ${color} 20%, transparent)` : 'none',
+              boxShadow: n.selected ? `0 0 0 3px color-mix(in oklch, ${color} 20%, transparent)` : 'none',
+              cursor: onSelectNode ? 'pointer' : 'default',
             }}
           >
             <div
@@ -70,7 +91,7 @@ export function FlowCanvas({ nodes, links }: { nodes: FlowNode[]; links: FlowLin
                 <span className="mono tracked text-[10px]">{n.type}</span>
               </span>
               <span className="mono text-[10px]" style={{ color, opacity: 0.7 }}>
-                {n.id}
+                {n.id.slice(0, 6)}
               </span>
             </div>
             <div className="px-3 py-2.5">

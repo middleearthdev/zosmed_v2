@@ -13,6 +13,7 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/zosmed/zosmed/apps/worker/internal/runner"
+	"github.com/zosmed/zosmed/apps/worker/internal/wfload"
 	"github.com/zosmed/zosmed/libs/igapi"
 	seller "github.com/zosmed/zosmed/libs/kits/seller"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
@@ -20,6 +21,13 @@ import (
 	"github.com/zosmed/zosmed/libs/platform/uuidx"
 	"github.com/zosmed/zosmed/libs/workflow"
 )
+
+// fallbackWorkflowName labels workflow_run rows produced by the transitional
+// built-in comment-to-order workflow (ADR-004 R3) — it has no workflow row of
+// its own, so this is the display name the Runs screen shows until an
+// account has an equivalent saved/activated workflow (R3: retire once B10's
+// seed is verified in production).
+const fallbackWorkflowName = "Comment-to-Order (bawaan)"
 
 // CommentIngestHandler handles the "comment:ingest" task (ptasks.TaskCommentIngest).
 // It is the entry point for the comment-to-order flow inside the worker.
@@ -144,18 +152,103 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 	// igapi.Client satisfies workflow.Sender structurally (same method signatures).
 	sender := igapi.New(account.AccessToken)
 
-	result, err := h.r.Engine.Run(ctx, event, sender, h.r.Gate)
+	triggerSummary := fmt.Sprintf("comment by @%s", p.FromUsername)
+	runStart := time.Now()
+
+	// ADR-004 §4.2: load this account's `live` workflows (persisted via the
+	// builder API), compile each with the shared FactoryMap, and run them
+	// through the UNCHANGED engine (libs/workflow/engine.go). Falls back to
+	// the legacy built-in CommentToOrderWorkflow (R3) when the account has
+	// not yet saved/activated an equivalent workflow, so the ADR-001 slice
+	// never breaks during rollout.
+	loaded, err := h.r.Loader.LoadLive(ctx, accountID)
 	if err != nil {
-		return fmt.Errorf("comment_ingest: engine run: %w", err)
+		return fmt.Errorf("comment_ingest: load live workflows: %w", err)
 	}
 
+	if len(loaded) == 0 {
+		result, err := h.r.Engine.Run(ctx, event, sender, h.r.Gate)
+		if err != nil {
+			return fmt.Errorf("comment_ingest: engine run (fallback): %w", err)
+		}
+		logEngineResult(log, "fallback built-in", result)
+		// ADR-004 R2: only persist a run row when the event actually triggered.
+		if result.Triggered {
+			if err := h.r.RunStore.Insert(ctx, result, wfload.RunMeta{
+				AccountID:      accountID,
+				WorkflowID:     nil, // no persisted workflow row for the fallback (R3/R4)
+				WorkflowName:   fallbackWorkflowName,
+				TriggerSource:  workflow.SourceComment,
+				TriggerSummary: triggerSummary,
+				ObjectID:       p.CommentID,
+				DurationMs:     int32(time.Since(runStart).Milliseconds()),
+			}); err != nil {
+				log.Error("comment_ingest: insert run log (fallback)", slog.String("error", err.Error()))
+			}
+		}
+		return nil
+	}
+
+	// Try each `live` workflow in the order the loader returned them; the
+	// first whose trigger(s) fire wins. Each persisted workflow is compiled
+	// and run as its own single-WorkflowDef Engine — registries never need to
+	// be merged across workflows because Compile keys every node by its own
+	// UUID (ADR-004 §1), so this loop reproduces exactly the "first matching
+	// workflow wins" semantics Engine.Run already implements internally.
+	for _, lw := range loaded {
+		reg, def, err := h.r.Compiler.Compile(lw.PWF)
+		if err != nil {
+			log.Error("comment_ingest: compile workflow — skipped",
+				slog.String("workflow_name", lw.Name),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+
+		eng := workflow.NewEngine(reg, []workflow.WorkflowDef{def})
+		result, err := eng.Run(ctx, event, sender, h.r.Gate)
+		if err != nil {
+			return fmt.Errorf("comment_ingest: engine run (workflow %q): %w", lw.Name, err)
+		}
+		if !result.Triggered {
+			continue
+		}
+
+		logEngineResult(log, lw.Name, result)
+
+		workflowID, parseErr := uuidx.Parse(lw.PWF.ID)
+		if parseErr != nil {
+			log.Error("comment_ingest: parse workflow id", slog.String("error", parseErr.Error()))
+		} else if err := h.r.RunStore.Insert(ctx, result, wfload.RunMeta{
+			AccountID:      accountID,
+			WorkflowID:     &workflowID,
+			WorkflowName:   lw.Name,
+			TriggerSource:  workflow.SourceComment,
+			TriggerSummary: triggerSummary,
+			ObjectID:       p.CommentID,
+			DurationMs:     int32(time.Since(runStart).Milliseconds()),
+		}); err != nil {
+			log.Error("comment_ingest: insert run log", slog.String("error", err.Error()))
+		}
+		return nil
+	}
+
+	// ADR-004 R2: no live workflow triggered on this event — log only, no
+	// workflow_run row (keeps the audit table free of per-comment noise).
+	log.Debug("comment_ingest: no live workflow triggered")
+	return nil
+}
+
+// logEngineResult writes the standard post-run summary line, shared by both
+// the fallback and per-workflow run paths (§12a-1 DRY).
+func logEngineResult(log *slog.Logger, workflowName string, result workflow.RunResult) {
 	log.Info("comment_ingest: engine run complete",
+		slog.String("workflow_name", workflowName),
 		slog.String("workflow_id", result.WorkflowID),
 		slog.Bool("triggered", result.Triggered),
 		slog.Bool("filter_passed", result.FilterPassed),
 		slog.Int("steps", len(result.Steps)),
 	)
-	return nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

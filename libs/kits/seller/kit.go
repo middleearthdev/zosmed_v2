@@ -46,10 +46,29 @@ const (
 //
 // enqueueOutbound schedules a private-reply retry when the safety gate returns
 // Queue (MAJOR-2); pass nil to disable retry (Queue is reported deferred only).
+//
+// Instance construction is shared with RegisterFactories (ADR-004 §6.1 B5,
+// §12a-1 DRY) via the newCommentTrigger/newReserveAction/newPrivateReplyAction
+// constructors below — this func wires them under the fixed legacy keys used
+// by the transitional fallback workflow (runner.CommentToOrderWorkflow, R3).
 func RegisterNodes(reg *workflow.Registry, svc *ReservationService, waPhone string, enqueueOutbound EnqueueOutboundFunc) {
-	reg.RegisterTrigger(NodeKeyCommentTrigger, &commentTrigger{})
-	reg.RegisterAction(NodeKeyReserve, &reserveAction{svc: svc, waPhone: waPhone})
-	reg.RegisterAction(NodeKeyPrivateReply, &privateReplyAction{svc: svc, enqueueOutbound: enqueueOutbound})
+	reg.RegisterTrigger(NodeKeyCommentTrigger, newCommentTrigger())
+	reg.RegisterAction(NodeKeyReserve, newReserveAction(svc, waPhone))
+	reg.RegisterAction(NodeKeyPrivateReply, newPrivateReplyAction(svc, enqueueOutbound))
+}
+
+// ── shared instance constructors (§12a-1 DRY: used by both RegisterNodes,
+// the legacy fixed-key registry, and factories.go, the per-node-id compiled
+// registry) ───────────────────────────────────────────────────────────────────
+
+func newCommentTrigger() *commentTrigger { return &commentTrigger{} }
+
+func newReserveAction(svc *ReservationService, waPhone string) *reserveAction {
+	return &reserveAction{svc: svc, waPhone: waPhone}
+}
+
+func newPrivateReplyAction(svc *ReservationService, enqueueOutbound EnqueueOutboundFunc) *privateReplyAction {
+	return &privateReplyAction{svc: svc, enqueueOutbound: enqueueOutbound}
 }
 
 // ── commentTrigger ────────────────────────────────────────────────────────────

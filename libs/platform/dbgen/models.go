@@ -75,6 +75,70 @@ func AllReservationStatusValues() []ReservationStatus {
 	}
 }
 
+type WorkflowStatus string
+
+const (
+	WorkflowStatusDraft  WorkflowStatus = "draft"
+	WorkflowStatusLive   WorkflowStatus = "live"
+	WorkflowStatusPaused WorkflowStatus = "paused"
+	WorkflowStatusError  WorkflowStatus = "error"
+)
+
+func (e *WorkflowStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = WorkflowStatus(s)
+	case string:
+		*e = WorkflowStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for WorkflowStatus: %T", src)
+	}
+	return nil
+}
+
+type NullWorkflowStatus struct {
+	WorkflowStatus WorkflowStatus `json:"workflow_status"`
+	Valid          bool           `json:"valid"` // Valid is true if WorkflowStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullWorkflowStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.WorkflowStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.WorkflowStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullWorkflowStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.WorkflowStatus), nil
+}
+
+func (e WorkflowStatus) Valid() bool {
+	switch e {
+	case WorkflowStatusDraft,
+		WorkflowStatusLive,
+		WorkflowStatusPaused,
+		WorkflowStatusError:
+		return true
+	}
+	return false
+}
+
+func AllWorkflowStatusValues() []WorkflowStatus {
+	return []WorkflowStatus{
+		WorkflowStatusDraft,
+		WorkflowStatusLive,
+		WorkflowStatusPaused,
+		WorkflowStatusError,
+	}
+}
+
 type Account struct {
 	ID               pgtype.UUID        `json:"id"`
 	IgUserID         string             `json:"ig_user_id"`
@@ -168,4 +232,50 @@ type UserSession struct {
 	UserID    pgtype.UUID        `json:"user_id"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+type Workflow struct {
+	ID        pgtype.UUID        `json:"id"`
+	AccountID pgtype.UUID        `json:"account_id"`
+	Name      string             `json:"name"`
+	Status    WorkflowStatus     `json:"status"`
+	Segment   string             `json:"segment"`
+	Version   int32              `json:"version"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+type WorkflowEdge struct {
+	ID         pgtype.UUID `json:"id"`
+	WorkflowID pgtype.UUID `json:"workflow_id"`
+	FromNodeID pgtype.UUID `json:"from_node_id"`
+	ToNodeID   pgtype.UUID `json:"to_node_id"`
+}
+
+type WorkflowNode struct {
+	ID         pgtype.UUID        `json:"id"`
+	WorkflowID pgtype.UUID        `json:"workflow_id"`
+	Category   string             `json:"category"`
+	NodeType   string             `json:"node_type"`
+	Config     []byte             `json:"config"`
+	PositionX  int32              `json:"position_x"`
+	PositionY  int32              `json:"position_y"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkflowRun struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkflowID     pgtype.UUID        `json:"workflow_id"`
+	WorkflowName   string             `json:"workflow_name"`
+	AccountID      pgtype.UUID        `json:"account_id"`
+	TriggerSource  string             `json:"trigger_source"`
+	TriggerSummary string             `json:"trigger_summary"`
+	ObjectID       string             `json:"object_id"`
+	Status         string             `json:"status"`
+	Triggered      bool               `json:"triggered"`
+	FilterPassed   bool               `json:"filter_passed"`
+	Steps          []byte             `json:"steps"`
+	Error          string             `json:"error"`
+	DurationMs     int32              `json:"duration_ms"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/zosmed/zosmed/apps/api/internal/enqueue"
 	"github.com/zosmed/zosmed/apps/api/internal/httpx"
 	"github.com/zosmed/zosmed/apps/api/internal/webhook"
+	"github.com/zosmed/zosmed/apps/api/internal/workflow"
 	"github.com/zosmed/zosmed/libs/igapi"
 	"github.com/zosmed/zosmed/libs/platform/config"
 	"github.com/zosmed/zosmed/libs/platform/db"
@@ -77,24 +78,37 @@ func main() {
 	whHandler := webhook.New(queries, enqClient, cfg.IGAppSecret, cfg.IGVerifyToken, log)
 	coHandler := commentorder.NewHandler(queries)
 
+	// ── Workflow builder (ADR-004) ────────────────────────────────────────────────
+	workflowStore := workflow.NewStore(pool, queries)
+	workflowHandler := workflow.NewHandler(queries, workflowStore)
+
 	// ── Wire router ───────────────────────────────────────────────────────────────
 	router := httpx.NewRouter(httpx.Routes{
-		WebhookChallenge:   whHandler.Challenge,
-		WebhookReceive:     whHandler.Receive,
-		ConnectStart:       connectHandler.Start,
-		ConnectCallback:    connectHandler.Callback,
-		GetCommentOrder:    coHandler.GetCommentOrder,
-		GetReservation:     coHandler.GetReservation,
-		CloseReservation:   coHandler.CloseReservation,
-		GetSettings:        coHandler.GetSettings,
-		PutSettings:        coHandler.PutSettings,
-		Register:           authHandler.Register,
-		Login:              authHandler.Login,
-		Logout:             authHandler.Logout,
-		Me:                 authHandler.Me,
-		PutSegment:         authHandler.PutSegment,
-		CompleteOnboarding: authHandler.CompleteOnboarding,
-		RequireUser:        requireUser,
+		WebhookChallenge:    whHandler.Challenge,
+		WebhookReceive:      whHandler.Receive,
+		ConnectStart:        connectHandler.Start,
+		ConnectCallback:     connectHandler.Callback,
+		GetCommentOrder:     coHandler.GetCommentOrder,
+		GetReservation:      coHandler.GetReservation,
+		CloseReservation:    coHandler.CloseReservation,
+		GetSettings:         coHandler.GetSettings,
+		PutSettings:         coHandler.PutSettings,
+		Register:            authHandler.Register,
+		Login:               authHandler.Login,
+		Logout:              authHandler.Logout,
+		Me:                  authHandler.Me,
+		PutSegment:          authHandler.PutSegment,
+		CompleteOnboarding:  authHandler.CompleteOnboarding,
+		ListWorkflows:       workflowHandler.List,
+		CreateWorkflow:      workflowHandler.Create,
+		GetWorkflow:         workflowHandler.Get,
+		SaveWorkflow:        workflowHandler.Save,
+		DeleteWorkflow:      workflowHandler.Delete,
+		ActivateWorkflow:    workflowHandler.Activate,
+		PauseWorkflow:       workflowHandler.Pause,
+		ListRunsForWorkflow: workflowHandler.ListRunsForWorkflow,
+		ListRunsForAccount:  workflowHandler.ListRunsForAccount,
+		RequireUser:         requireUser,
 	})
 
 	// ── HTTP server ───────────────────────────────────────────────────────────────

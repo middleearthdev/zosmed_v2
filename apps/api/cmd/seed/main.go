@@ -22,8 +22,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/zosmed/zosmed/apps/api/internal/auth"
 	"github.com/zosmed/zosmed/apps/api/internal/connect"
+	apiworkflow "github.com/zosmed/zosmed/apps/api/internal/workflow"
 	"github.com/zosmed/zosmed/libs/platform/config"
 	"github.com/zosmed/zosmed/libs/platform/db"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
@@ -43,6 +46,12 @@ const (
 
 	demoMediaID = "SEED-MEDIA-0001"
 	demoCaption = "Drop koleksi baru! Komen KEEP + kode buat checkout ya kak 🛍️"
+
+	// seedWorkflowName is the demo Comment-to-Order workflow (ADR-004 B10):
+	// having one `live` workflow row lets apps/worker's loader (wfload.LoadLive)
+	// find it immediately, exercising the compiled-graph runtime path instead
+	// of always falling back to the built-in CommentToOrderWorkflow (R3).
+	seedWorkflowName = "Comment-to-Order (keep/C)"
 )
 
 func main() {
@@ -93,6 +102,11 @@ func main() {
 
 	if err := seedProducts(ctx, queries, post, log); err != nil {
 		log.Error("seed: products", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	if err := seedWorkflow(ctx, pool, queries, account, log); err != nil {
+		log.Error("seed: workflow", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 
@@ -194,6 +208,50 @@ func seedProducts(ctx context.Context, q *dbgen.Queries, post dbgen.CatalogPost,
 		}
 	}
 	log.Info("seed: upserted demo products", slog.Int("count", len(demoProducts)))
+	return nil
+}
+
+// seedWorkflow creates + activates one `live` seller Comment-to-Order
+// workflow for account, mirroring the legacy built-in
+// runner.CommentToOrderWorkflow: trigger "comment-to-order" -> action
+// "reserve-stock" (which internally reserves stock AND sends the gated
+// wa.me private reply, libs/kits/seller.reserveAndReplyAction). Idempotent
+// by workflow name — a second run finds the existing row and skips.
+func seedWorkflow(ctx context.Context, pool *pgxpool.Pool, q *dbgen.Queries, account dbgen.Account, log *slog.Logger) error {
+	existing, err := q.ListWorkflowsByAccount(ctx, account.ID)
+	if err != nil {
+		return fmt.Errorf("list existing workflows: %w", err)
+	}
+	for _, w := range existing {
+		if w.Name == seedWorkflowName {
+			log.Info("seed: demo comment-to-order workflow already exists, skipping create",
+				slog.String("workflow_id", uuidx.Format(w.ID)))
+			return nil
+		}
+	}
+
+	wf, err := q.CreateWorkflow(ctx, dbgen.CreateWorkflowParams{
+		AccountID: account.ID,
+		Name:      seedWorkflowName,
+		Segment:   "seller",
+	})
+	if err != nil {
+		return fmt.Errorf("create demo workflow: %w", err)
+	}
+
+	store := apiworkflow.NewStore(pool, q)
+	if _, _, _, err := store.Save(ctx, wf.ID, account.ID, seedWorkflowName, []apiworkflow.NodeInput{
+		{ClientID: "trigger", Category: "trigger", NodeType: "comment-to-order", Config: []byte(`{}`)},
+		{ClientID: "action", Category: "action", NodeType: "reserve-stock", Config: []byte(`{}`)},
+	}, nil); err != nil {
+		return fmt.Errorf("save demo workflow graph: %w", err)
+	}
+
+	if _, err := q.ActivateWorkflow(ctx, dbgen.ActivateWorkflowParams{ID: wf.ID, AccountID: account.ID}); err != nil {
+		return fmt.Errorf("activate demo workflow: %w", err)
+	}
+
+	log.Info("seed: created + activated demo comment-to-order workflow", slog.String("workflow_id", uuidx.Format(wf.ID)))
 	return nil
 }
 

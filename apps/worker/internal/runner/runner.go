@@ -16,11 +16,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/zosmed/zosmed/apps/worker/internal/wfload"
 	seller "github.com/zosmed/zosmed/libs/kits/seller"
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
 	ptasks "github.com/zosmed/zosmed/libs/platform/tasks"
 	"github.com/zosmed/zosmed/libs/safety"
 	"github.com/zosmed/zosmed/libs/workflow"
+	"github.com/zosmed/zosmed/libs/workflow/nodes"
 )
 
 // outboundMaxRetry caps how many times a deferred private reply (MAJOR-2) is
@@ -44,10 +46,21 @@ var CommentToOrderWorkflow = workflow.WorkflowDef{
 // there is no single static token anymore, so the Runner itself stays
 // stateless with respect to IG credentials.
 type Runner struct {
+	// Engine runs the transitional fallback built-in comment-to-order workflow
+	// (ADR-004 R3) for accounts that have not yet saved/activated an
+	// equivalent workflow via the builder API. comment_ingest.go only falls
+	// back to this when Loader.LoadLive returns zero `live` workflows.
 	Engine *workflow.Engine
-	DB     *dbgen.Queries             // exposed for task handlers to load catalog/account context
-	Gate   workflow.Gater             // safety.Gate adapted to workflow.Gater (one-door)
-	Svc    *seller.ReservationService // exposed for reservation:expire handler
+	// Compiler maps a persisted graph (loader.LoadLive) to a ready-to-run
+	// (*workflow.Registry, workflow.WorkflowDef) pair using the FactoryMap
+	// assembled in New (ADR-004 §1/§4).
+	Compiler *workflow.Compiler
+	Loader   *wfload.Loader   // reads `live` workflows for an account
+	RunStore *wfload.RunStore // writes workflow_run rows (ADR-004 R2)
+
+	DB   *dbgen.Queries             // exposed for task handlers to load catalog/account context
+	Gate workflow.Gater             // safety.Gate adapted to workflow.Gater (one-door)
+	Svc  *seller.ReservationService // exposed for reservation:expire handler
 }
 
 // New creates a fully wired Runner.
@@ -129,11 +142,24 @@ func New(
 	safetyGate := safety.New(rdb)
 	adapted := &gateAdapter{g: safetyGate}
 
+	// FactoryMap assembly (ADR-004 §1 STARTUP diagram): neutral nodes first,
+	// then the seller Kit — order doesn't matter, keys (node_type strings)
+	// never collide between the two. Neither libs/workflow/nodes nor
+	// libs/workflow/compile.go ever imports libs/kits/seller (§9 guardrail);
+	// only this apps/worker wiring layer is allowed to know about both.
+	fmap := workflow.FactoryMap{}
+	nodes.RegisterFactories(fmap)
+	seller.RegisterFactories(fmap, svc, waPhone, enqueueOutbound)
+	compiler := workflow.NewCompiler(fmap)
+
 	return &Runner{
-		Engine: eng,
-		DB:     db,
-		Gate:   adapted,
-		Svc:    svc,
+		Engine:   eng,
+		Compiler: compiler,
+		Loader:   wfload.NewLoader(db),
+		RunStore: wfload.NewRunStore(db),
+		DB:       db,
+		Gate:     adapted,
+		Svc:      svc,
 	}
 }
 

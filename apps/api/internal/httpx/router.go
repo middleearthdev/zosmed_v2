@@ -44,6 +44,18 @@ type Routes struct {
 	PutSegment         http.HandlerFunc
 	CompleteOnboarding http.HandlerFunc
 
+	// Workflow builder (ADR-004 §3) — all require RequireUser; scoped to the
+	// caller's own account (GetAccountByUserID, R5).
+	ListWorkflows       http.HandlerFunc
+	CreateWorkflow      http.HandlerFunc
+	GetWorkflow         http.HandlerFunc
+	SaveWorkflow        http.HandlerFunc
+	DeleteWorkflow      http.HandlerFunc
+	ActivateWorkflow    http.HandlerFunc
+	PauseWorkflow       http.HandlerFunc
+	ListRunsForWorkflow http.HandlerFunc
+	ListRunsForAccount  http.HandlerFunc
+
 	// RequireUser is injected from main.go (it needs a DB-backed Store, which
 	// httpx must not depend on directly — hindari import cycle httpx<->auth).
 	RequireUser func(http.Handler) http.Handler
@@ -94,6 +106,19 @@ func NewRouter(routes Routes) http.Handler {
 
 		r.Get("/api/v1/comment-order/settings", routes.GetSettings)
 		r.Put("/api/v1/comment-order/settings", routes.PutSettings)
+
+		// Workflow builder (ADR-004 §3). Sub-routes (/activate, /pause, /runs)
+		// are registered before the bare /{id} GET/PUT/DELETE so chi does not
+		// swallow them as a dynamic segment (same pattern as /reservations/{id}).
+		r.Get("/api/v1/workflows", routes.ListWorkflows)
+		r.Post("/api/v1/workflows", routes.CreateWorkflow)
+		r.Post("/api/v1/workflows/{id}/activate", routes.ActivateWorkflow)
+		r.Post("/api/v1/workflows/{id}/pause", routes.PauseWorkflow)
+		r.Get("/api/v1/workflows/{id}/runs", routes.ListRunsForWorkflow)
+		r.Get("/api/v1/workflows/{id}", routes.GetWorkflow)
+		r.Put("/api/v1/workflows/{id}", routes.SaveWorkflow)
+		r.Delete("/api/v1/workflows/{id}", routes.DeleteWorkflow)
+		r.Get("/api/v1/runs", routes.ListRunsForAccount)
 	})
 
 	return r
