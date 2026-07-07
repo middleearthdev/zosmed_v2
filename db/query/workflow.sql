@@ -26,6 +26,17 @@ SELECT * FROM workflow
 WHERE account_id = @account_id AND status = 'live'
 ORDER BY created_at ASC;
 
+-- name: HasLiveWorkflow :one
+-- Ingest decoupling enabler (ADR-005 §3/B1): cheap existence check used by
+-- apps/api/internal/webhook.processComment to decide whether a comment on a
+-- non-catalog post should still be enqueued because the account has at least
+-- one generic `live` workflow. Backed by the partial index workflow_live_idx
+-- (WHERE status = 'live'), so this is an index-only existence probe, not a
+-- full table scan.
+SELECT EXISTS (
+    SELECT 1 FROM workflow WHERE account_id = @account_id AND status = 'live'
+) AS has_live;
+
 -- name: UpdateWorkflowMeta :one
 -- Save draft (PUT): renames the workflow and bumps updated_at. version is
 -- intentionally NOT bumped here — version only bumps on activate (§2.1 comment).

@@ -33,6 +33,23 @@ type reserveAndReplyAction struct {
 	reply   *privateReplyAction
 }
 
+// keepCodeCommentTrigger is the factory-built variant of commentTrigger for
+// the "comment-to-order" node inside a user-saved workflow (ADR-005 §3 R3).
+//
+// The legacy commentTrigger (kit.go) fires on Source == comment and relies on
+// comment:ingest pre-screening to keep-code comments before Engine.Run. After
+// the ADR-005 ingest decoupling a builder workflow receives EVERY comment on
+// the account, so this trigger must itself gate on a detected keep code
+// (Event.Raw[RawKeyKode], set best-effort by comment_ingest) — otherwise a
+// seller's comment-to-order workflow would reserve stock on every ordinary
+// comment. Same end-state as before (reserve only on keep-code comments); the
+// guard just moves from the ingest pre-screen into the trigger itself.
+type keepCodeCommentTrigger struct{}
+
+func (keepCodeCommentTrigger) Match(_ context.Context, e workflow.Event) bool {
+	return e.Source == workflow.SourceComment && rawString(e.Raw, RawKeyKode) != ""
+}
+
 func (a *reserveAndReplyAction) Execute(ctx context.Context, rc *workflow.RunContext) (workflow.ActionResult, error) {
 	reserveResult, err := a.reserve.Execute(ctx, rc)
 	if err != nil {
@@ -56,7 +73,9 @@ func RegisterFactories(fmap workflow.FactoryMap, svc *ReservationService, waPhon
 	fmap[nodeTypeCommentToOrder] = workflow.Factory{
 		Category: workflow.KindTrigger,
 		Build: func(_ json.RawMessage) (any, error) {
-			return newCommentTrigger(), nil
+			// R3: keep-code-guarded (not the bare Source==comment commentTrigger),
+			// because decoupled ingest now delivers every comment to this workflow.
+			return keepCodeCommentTrigger{}, nil
 		},
 	}
 	fmap[nodeTypeReserveStock] = workflow.Factory{

@@ -68,34 +68,16 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 		slog.String("media_id", p.MediaID),
 	)
 
-	// Step 2: keep-code detection. Skip non-matching comments early.
-	code, ok := seller.DetectKeepCode(p.Text)
-	if !ok {
-		log.Debug("comment_ingest: no keep code — skip")
-		return nil
-	}
-
 	// Parse AccountID from string to pgtype.UUID.
 	accountID, err := uuidx.Parse(p.AccountID)
 	if err != nil {
 		return fmt.Errorf("comment_ingest: parse account_id %q: %w", p.AccountID, err)
 	}
 
-	// Step 3: confirm the media is a registered, active catalog post.
-	catalogPost, err := h.r.DB.GetActiveCatalogPostByMedia(ctx, dbgen.GetActiveCatalogPostByMediaParams{
-		IgMediaID: p.MediaID,
-		AccountID: accountID,
-	})
-	if err != nil {
-		if isNoRows(err) {
-			log.Debug("comment_ingest: media not in active catalog — skip", slog.String("media_id", p.MediaID))
-			return nil
-		}
-		return fmt.Errorf("comment_ingest: get catalog post: %w", err)
-	}
-
-	// Step 4 (ADR-002 §6.2): load the connected account — token + ig_user_id
-	// come from Postgres per-account, never from env or the task payload.
+	// Load the connected account first (ADR-002 §6.2): token + ig_user_id come
+	// from Postgres per-account, never from env or the task payload. Every path
+	// now needs it (generic workflows too), so it precedes the seller-specific
+	// keep-code/catalog enrichment below.
 	account, err := h.r.DB.GetAccountByID(ctx, accountID)
 	if err != nil {
 		if isNoRows(err) {
@@ -111,10 +93,36 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 		return nil
 	}
 
-	// Step 5: load per-account settings (non-fatal; defaults apply).
+	// Seller-kit enrichment (ADR-005 §3 B1) — BEST-EFFORT, not a gate. The
+	// ingest pipeline no longer drops non-keep-code comments (the webhook now
+	// enqueues every comment for accounts with a live workflow), so a generic
+	// workflow like [comment-received → reply-comment] can run on ordinary
+	// comments. We still detect a keep code + resolve its catalog post when
+	// present so the seller comment-to-order slice keeps working; these keys
+	// only populate Raw for seller nodes, which the neutral nodes ignore.
+	code, hasCode := seller.DetectKeepCode(p.Text)
+	var catalogPostID string
+	inCatalog := false
+	if hasCode {
+		catalogPost, cerr := h.r.DB.GetActiveCatalogPostByMedia(ctx, dbgen.GetActiveCatalogPostByMediaParams{
+			IgMediaID: p.MediaID,
+			AccountID: accountID,
+		})
+		switch {
+		case cerr == nil:
+			catalogPostID = uuidx.Format(catalogPost.ID)
+			inCatalog = true
+		case isNoRows(cerr):
+			// Keep code on a non-catalog post: seller reserve can't run, but a
+			// generic live workflow still might — carry on without catalog context.
+		default:
+			return fmt.Errorf("comment_ingest: get catalog post: %w", cerr)
+		}
+	}
+
+	// Per-account hold seconds (non-fatal; default applies).
 	holdSeconds := seller.DefaultHoldSeconds
-	settings, settingsErr := h.r.DB.GetCommentOrderSettings(ctx, accountID)
-	if settingsErr == nil {
+	if settings, settingsErr := h.r.DB.GetCommentOrderSettings(ctx, accountID); settingsErr == nil {
 		holdSeconds = settings.HoldSeconds
 	}
 
@@ -127,9 +135,21 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 		}
 	}
 
-	// Step 6: build a source-agnostic workflow.Event and run the engine.
-	// Raw carries seller-kit-specific context; engine is neutral to these keys.
+	// Build a source-agnostic workflow.Event. Raw always carries ig_user_id +
+	// comment_at (used by neutral and seller nodes alike); the seller-specific
+	// keep-code/catalog keys are set only when detected (ADR-005 §3 B1).
 	// Guardrail D: {nama} ONLY from webhook payload (p.FromUsername) — not scraped.
+	raw := map[string]any{
+		seller.RawKeyIgUserID:    account.IgUserID,
+		seller.RawKeyCommentAt:   commentAt, // from webhook entry.time (M4), not dequeue time
+		seller.RawKeyHoldSeconds: holdSeconds,
+	}
+	if hasCode {
+		raw[seller.RawKeyKode] = code
+	}
+	if inCatalog {
+		raw[seller.RawKeyCatalogPostID] = catalogPostID
+	}
 	event := workflow.Event{
 		Source:       workflow.SourceComment,
 		AccountID:    p.AccountID,
@@ -138,13 +158,7 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 		FromID:       p.FromID,
 		FromUsername: p.FromUsername,
 		Text:         p.Text,
-		Raw: map[string]any{
-			seller.RawKeyCatalogPostID: uuidx.Format(catalogPost.ID),
-			seller.RawKeyKode:          code,
-			seller.RawKeyHoldSeconds:   holdSeconds,
-			seller.RawKeyIgUserID:      account.IgUserID,
-			seller.RawKeyCommentAt:     commentAt, // from webhook entry.time (M4), not dequeue time
-		},
+		Raw:          raw,
 	}
 
 	// Create igapi.Client for this engine run, built from the account's own
@@ -167,6 +181,14 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 	}
 
 	if len(loaded) == 0 {
+		// The transitional fallback only knows the seller comment-to-order slice
+		// (ADR-004 R3). With no live workflow AND no keep code on a catalog post
+		// there is nothing it can do — skip rather than run it on an ordinary
+		// comment (which must NOT reserve stock).
+		if !hasCode || !inCatalog {
+			log.Debug("comment_ingest: no live workflow and not a keep-code order — skip")
+			return nil
+		}
 		result, err := h.r.Engine.Run(ctx, event, sender, h.r.Gate)
 		if err != nil {
 			return fmt.Errorf("comment_ingest: engine run (fallback): %w", err)

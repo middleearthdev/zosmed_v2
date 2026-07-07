@@ -84,7 +84,7 @@ function summarizeConfig(node: WorkflowNode): string {
       return keywords.length ? keywords.map((k) => `"${k}"`).join(' · ') : 'belum ada kata kunci';
     }
     case 'send-whatsapp-link': {
-      const phone = typeof cfg.waPhone === 'string' ? cfg.waPhone : '';
+      const phone = typeof cfg.phone === 'string' ? cfg.phone : '';
       return phone ? `wa.me/${phone}` : 'nomor WA belum diisi';
     }
     default:

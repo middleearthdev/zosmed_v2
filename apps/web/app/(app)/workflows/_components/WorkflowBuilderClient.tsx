@@ -16,7 +16,7 @@ import { Palette } from './Palette';
 import { FlowCanvas } from './FlowCanvas';
 import { NodeInspector } from './NodeInspector';
 import { useWorkflowGraph } from './useWorkflowGraph';
-import { buildPaletteSections, edgesToFlowLinks, nodeToFlowNode, statusPillLabel, statusPillTone } from '@/lib/workflow-catalog';
+import { buildPaletteSections, nodeToFlowNode, statusPillLabel, statusPillTone } from '@/lib/workflow-catalog';
 
 const paletteSections = buildPaletteSections(NODE_CATALOG);
 
@@ -32,7 +32,6 @@ export function WorkflowBuilderClient({ initialWorkflow }: { initialWorkflow: Wo
       ),
     [g.workflow.nodes, g.selectedNodeId],
   );
-  const flowLinks = useMemo(() => edgesToFlowLinks(g.workflow.edges), [g.workflow.edges]);
   const selectedCatalogEntry = g.selectedNode ? findCatalogEntry(g.selectedNode.node.kind) : undefined;
   const canPause = g.workflow.status === 'live';
 
@@ -91,19 +90,26 @@ export function WorkflowBuilderClient({ initialWorkflow }: { initialWorkflow: Wo
 
         {/* Canvas */}
         <div className="bg-bg relative flex-1 overflow-hidden">
-          <div
-            className="absolute inset-0"
-            style={{ backgroundImage: 'radial-gradient(#1f1f23 1px, transparent 1px)', backgroundSize: '20px 20px' }}
-          />
           {g.workflow.nodes.length === 0 ? (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="max-w-xs text-center">
                 <p className="text-text-2 text-sm">Canvas masih kosong.</p>
-                <p className="text-text-3 mt-1 text-xs">Klik salah satu node di palette kiri (trigger dulu, lalu filter/action) untuk mulai membangun workflow.</p>
+                <p className="text-text-3 mt-1 text-xs">
+                  Klik salah satu node di palette kiri (trigger dulu, lalu filter/action) untuk mulai membangun workflow. Seret
+                  untuk menata, tarik dari titik kanan node untuk menyambungkan, pilih lalu tekan Delete untuk menghapus.
+                </p>
               </div>
             </div>
           ) : (
-            <FlowCanvas nodes={flowNodes} links={flowLinks} onSelectNode={g.selectNode} />
+            <FlowCanvas
+              nodes={flowNodes}
+              edges={g.workflow.edges}
+              onSelectNode={g.selectNode}
+              onMoveNode={g.moveNode}
+              onConnectNodes={g.addEdge}
+              onRemoveEdge={g.removeEdge}
+              onRemoveNode={g.removeNode}
+            />
           )}
         </div>
 

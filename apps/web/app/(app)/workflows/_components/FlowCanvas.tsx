@@ -1,115 +1,187 @@
-import { I } from '@zosmed/ui';
-import { NODE_COLORS, type FlowLink, type FlowNode } from '@/lib/mock/workflows';
-
-const NW = 220;
-const NH = 84;
+'use client';
 
 /**
- * Node graph canvas (SVG bezier links + node cards). Ported from the design
- * BigFlow layout; now click-to-select is wired (`onSelectNode`) so the
- * builder's inspector panel can edit the selected node's config (F4/F5).
- * Manual drag-repositioning / edge rewiring is out of scope this iteration
- * (ADR-004 §0 Non-Scope) — nodes are auto-laid-out and auto-wired on add.
+ * Workflow builder canvas (ADR-005 §F1–F3). Wraps React Flow (@xyflow/react)
+ * to give real drag-repositioning, edge-by-handle creation, and select+Delete
+ * removal — the flexibility the hand-rolled SVG canvas lacked. The domain
+ * model (`WorkflowNode`/`WorkflowEdge`) is untouched: this component adapts to
+ * React Flow's node/edge shapes and reports every mutation back up through
+ * callbacks (§12a-3 SoC — no data fetching, no domain writes here).
+ *
+ * Connection rules (isValidConnection): honour category order
+ * trigger→filter→action (never backward) and reject any edge that would form a
+ * cycle, so a saved graph always compiles to a DAG (backend activate rejects
+ * `cycle` otherwise).
  */
+import { useCallback, useEffect } from 'react';
+import {
+  Background,
+  Controls,
+  Handle,
+  Position,
+  ReactFlow,
+  useEdgesState,
+  useNodesState,
+  type Connection,
+  type Edge,
+  type IsValidConnection,
+  type Node,
+  type NodeProps,
+  type NodeTypes,
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
+import { I, type IconName } from '@zosmed/ui';
+import type { WorkflowEdge } from '@zosmed/types';
+import { NODE_COLORS, type FlowNode, type WfNodeType } from '@/lib/mock/workflows';
+
+type ZNodeData = {
+  title: string;
+  sub: string;
+  badge: string;
+  iconKey: IconName;
+  wfType: WfNodeType;
+  kind: string;
+};
+type ZNode = Node<ZNodeData, 'z'>;
+
+const CATEGORY_RANK: Record<WfNodeType, number> = { TRIGGER: 0, FILTER: 1, ACTION: 2, AI: 2, OUTPUT: 3 };
+
+function toRfNode(n: FlowNode): ZNode {
+  return {
+    id: n.id,
+    type: 'z',
+    position: { x: n.x, y: n.y },
+    selected: Boolean(n.selected),
+    data: { title: n.title, sub: n.sub, badge: n.badge, iconKey: n.iconKey, wfType: n.type, kind: n.type },
+  };
+}
+
+function ZFlowNode({ data, selected }: NodeProps<ZNode>) {
+  const color = NODE_COLORS[data.wfType];
+  const border = selected ? color : 'var(--zz-line)';
+  return (
+    <div
+      className="bg-bg-2 overflow-hidden rounded-lg"
+      style={{
+        width: 176,
+        border: `1px solid ${border}`,
+        boxShadow: selected ? `0 0 0 2px color-mix(in oklch, ${color} 22%, transparent)` : 'none',
+      }}
+    >
+      <Handle type="target" position={Position.Left} style={{ width: 7, height: 7, background: 'var(--zz-bg)', border: '1px solid var(--zz-line-2)' }} />
+      <div
+        className="border-line flex items-center gap-1.5 border-b px-2 py-1"
+        style={{ background: `color-mix(in oklch, ${color} 12%, transparent)`, color }}
+      >
+        <span className="inline-flex items-center gap-1 [&_svg]:h-3 [&_svg]:w-3">
+          {I[data.iconKey]()}
+          <span className="mono tracked text-[8.5px]">{data.kind}</span>
+        </span>
+      </div>
+      <div className="px-2.5 py-2">
+        <div className="text-text text-[12px] font-medium leading-tight">{data.title}</div>
+        <div className="mono text-text-2 mt-[2px] truncate text-[9.5px]">{data.sub}</div>
+        <div className="mt-2 flex items-center gap-1.5">
+          <span className="h-[4px] w-[4px] rounded-full" style={{ background: 'var(--zz-lime)' }} />
+          <span className="mono text-text-3 text-[9px]">{data.badge}</span>
+        </div>
+      </div>
+      <Handle type="source" position={Position.Right} style={{ width: 7, height: 7, background: color }} />
+    </div>
+  );
+}
+
+const nodeTypes: NodeTypes = { z: ZFlowNode };
+
 export function FlowCanvas({
   nodes,
-  links,
+  edges,
   onSelectNode,
+  onMoveNode,
+  onConnectNodes,
+  onRemoveEdge,
+  onRemoveNode,
 }: {
   nodes: FlowNode[];
-  links: FlowLink[];
-  onSelectNode?: (id: string) => void;
+  edges: WorkflowEdge[];
+  onSelectNode: (id: string | null) => void;
+  onMoveNode: (id: string, x: number, y: number) => void;
+  onConnectNodes: (from: string, to: string) => void;
+  onRemoveEdge: (id: string) => void;
+  onRemoveNode: (id: string) => void;
 }) {
-  const byId = (id: string) => nodes.find((n) => n.id === id);
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState<ZNode>(nodes.map(toRfNode));
+  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<Edge>(
+    edges.map((e) => ({ id: e.id, source: e.from, target: e.to })),
+  );
+
+  // Reconcile React Flow's local state whenever the domain graph changes
+  // (node added/removed, config/label edited, positions committed). During a
+  // drag the domain graph is stable, so this does not fire mid-gesture.
+  useEffect(() => {
+    setRfNodes(nodes.map(toRfNode));
+  }, [nodes, setRfNodes]);
+  useEffect(() => {
+    setRfEdges(edges.map((e) => ({ id: e.id, source: e.from, target: e.to })));
+  }, [edges, setRfEdges]);
+
+  const isValidConnection = useCallback<IsValidConnection<Edge>>(
+    (c) => {
+      const source = 'source' in c ? c.source : null;
+      const target = 'target' in c ? c.target : null;
+      if (!source || !target || source === target) return false;
+      const s = nodes.find((n) => n.id === source);
+      const t = nodes.find((n) => n.id === target);
+      if (!s || !t) return false;
+      if (CATEGORY_RANK[s.type] > CATEGORY_RANK[t.type]) return false; // never backward
+      // Reject if target can already reach source (adding source→target ⇒ cycle).
+      const adj = new Map<string, string[]>();
+      for (const e of edges) (adj.get(e.from) ?? adj.set(e.from, []).get(e.from)!).push(e.to);
+      const seen = new Set<string>();
+      const stack = [target];
+      while (stack.length) {
+        const cur = stack.pop()!;
+        if (cur === source) return false;
+        if (seen.has(cur)) continue;
+        seen.add(cur);
+        for (const nx of adj.get(cur) ?? []) stack.push(nx);
+      }
+      return true;
+    },
+    [nodes, edges],
+  );
+
+  const onConnect = useCallback(
+    (c: Connection) => {
+      if (c.source && c.target) onConnectNodes(c.source, c.target);
+    },
+    [onConnectNodes],
+  );
 
   return (
-    <div className="absolute inset-0">
-      <svg width="100%" height="100%" className="absolute inset-0">
-        <defs>
-          <marker id="arr" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-            <path d="M0,0 L10,5 L0,10 z" fill="var(--zz-line-2)" />
-          </marker>
-          <marker id="arr-l" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-            <path d="M0,0 L10,5 L0,10 z" fill="var(--zz-lime)" />
-          </marker>
-        </defs>
-        {links.map((lnk) => {
-          const A = byId(lnk.from);
-          const B = byId(lnk.to);
-          if (!A || !B) return null;
-          const x1 = A.x + NW;
-          const y1 = A.y + NH / 2;
-          const x2 = B.x;
-          const y2 = B.y + NH / 2;
-          const mx = (x1 + x2) / 2;
-          return (
-            <path
-              key={`${lnk.from}-${lnk.to}`}
-              d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`}
-              stroke={lnk.active ? 'var(--zz-lime)' : 'var(--zz-line-2)'}
-              strokeWidth={lnk.active ? 2 : 1.5}
-              strokeDasharray={lnk.active ? '4 4' : undefined}
-              fill="none"
-              markerEnd={`url(#${lnk.active ? 'arr-l' : 'arr'})`}
-            >
-              {lnk.active ? (
-                <animate attributeName="stroke-dashoffset" from="0" to="-16" dur="0.8s" repeatCount="indefinite" />
-              ) : null}
-            </path>
-          );
-        })}
-      </svg>
-
-      {nodes.map((n) => {
-        const color = NODE_COLORS[n.type];
-        const border = n.focus ? color : n.selected ? 'var(--zz-line-2)' : 'var(--zz-line)';
-        return (
-          <div
-            key={n.id}
-            role={onSelectNode ? 'button' : undefined}
-            tabIndex={onSelectNode ? 0 : undefined}
-            onClick={() => onSelectNode?.(n.id)}
-            onKeyDown={(e) => {
-              if (onSelectNode && (e.key === 'Enter' || e.key === ' ')) onSelectNode(n.id);
-            }}
-            className="bg-bg-2 absolute overflow-hidden rounded-[10px]"
-            style={{
-              left: n.x,
-              top: n.y,
-              width: NW,
-              border: `1px solid ${border}`,
-              boxShadow: n.selected ? `0 0 0 3px color-mix(in oklch, ${color} 20%, transparent)` : 'none',
-              cursor: onSelectNode ? 'pointer' : 'default',
-            }}
-          >
-            <div
-              className="border-line flex items-center justify-between border-b px-2.5 py-1.5"
-              style={{ background: `color-mix(in oklch, ${color} 12%, transparent)`, color }}
-            >
-              <span className="inline-flex items-center gap-1.5">
-                {I[n.iconKey]()}
-                <span className="mono tracked text-[10px]">{n.type}</span>
-              </span>
-              <span className="mono text-[10px]" style={{ color, opacity: 0.7 }}>
-                {n.id.slice(0, 6)}
-              </span>
-            </div>
-            <div className="px-3 py-2.5">
-              <div className="text-text text-[13.5px] font-medium">{n.title}</div>
-              <div className="mono text-text-2 mt-[3px] text-[11px]">{n.sub}</div>
-              <div className="mt-2.5 flex items-center gap-1.5">
-                <span className="h-[5px] w-[5px] rounded-full" style={{ background: 'var(--zz-lime)' }} />
-                <span className="mono text-text-3 text-[10.5px]">{n.badge}</span>
-              </div>
-            </div>
-            <span
-              className="bg-bg border-line-2 absolute rounded-full border"
-              style={{ left: -4, top: NH / 2 - 4, width: 8, height: 8 }}
-            />
-            <span className="absolute rounded-full" style={{ right: -4, top: NH / 2 - 4, width: 8, height: 8, background: color }} />
-          </div>
-        );
-      })}
-    </div>
+    <ReactFlow
+      colorMode="dark"
+      nodes={rfNodes}
+      edges={rfEdges}
+      nodeTypes={nodeTypes}
+      onNodesChange={onNodesChange}
+      onEdgesChange={onEdgesChange}
+      onNodeDragStop={(_, node) => onMoveNode(node.id, node.position.x, node.position.y)}
+      onNodeClick={(_, node) => onSelectNode(node.id)}
+      onPaneClick={() => onSelectNode(null)}
+      onConnect={onConnect}
+      isValidConnection={isValidConnection}
+      onEdgesDelete={(deleted) => deleted.forEach((e) => onRemoveEdge(e.id))}
+      onNodesDelete={(deleted) => deleted.forEach((n) => onRemoveNode(n.id))}
+      fitView
+      fitViewOptions={{ padding: 0.25, maxZoom: 0.9, minZoom: 0.4 }}
+      minZoom={0.3}
+      maxZoom={1.5}
+      proOptions={{ hideAttribution: true }}
+      defaultEdgeOptions={{ style: { stroke: 'var(--zz-line-2)', strokeWidth: 1.5 } }}
+    >
+      <Background color="var(--zz-line)" gap={20} />
+      <Controls showInteractive={false} />
+    </ReactFlow>
   );
 }

@@ -9,5 +9,9 @@ import "github.com/zosmed/zosmed/libs/workflow"
 func RegisterFactories(fmap workflow.FactoryMap) {
 	fmap[NodeTypeCommentReceived] = workflow.Factory{Category: workflow.KindTrigger, Build: BuildCommentReceived}
 	fmap[NodeTypeKeywordMatch] = workflow.Factory{Category: workflow.KindFilter, Build: BuildKeywordMatch}
+	fmap[NodeTypePostSelection] = workflow.Factory{Category: workflow.KindFilter, Build: BuildPostSelection}
+	fmap[NodeTypeTimeWindow] = workflow.Factory{Category: workflow.KindFilter, Build: BuildTimeWindow}
 	fmap[NodeTypeSendWhatsAppLink] = workflow.Factory{Category: workflow.KindAction, Build: BuildSendWhatsAppLink}
+	fmap[NodeTypeReplyComment] = workflow.Factory{Category: workflow.KindAction, Build: BuildReplyComment}
+	fmap[NodeTypeOutboundWebhook] = workflow.Factory{Category: workflow.KindAction, Build: BuildOutboundWebhook}
 }

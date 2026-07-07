@@ -137,6 +137,25 @@ func (q *Queries) GetWorkflowByID(ctx context.Context, arg GetWorkflowByIDParams
 	return i, err
 }
 
+const hasLiveWorkflow = `-- name: HasLiveWorkflow :one
+SELECT EXISTS (
+    SELECT 1 FROM workflow WHERE account_id = $1 AND status = 'live'
+) AS has_live
+`
+
+// Ingest decoupling enabler (ADR-005 §3/B1): cheap existence check used by
+// apps/api/internal/webhook.processComment to decide whether a comment on a
+// non-catalog post should still be enqueued because the account has at least
+// one generic `live` workflow. Backed by the partial index workflow_live_idx
+// (WHERE status = 'live'), so this is an index-only existence probe, not a
+// full table scan.
+func (q *Queries) HasLiveWorkflow(ctx context.Context, accountID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, hasLiveWorkflow, accountID)
+	var has_live bool
+	err := row.Scan(&has_live)
+	return has_live, err
+}
+
 const insertEdge = `-- name: InsertEdge :one
 INSERT INTO workflow_edge (workflow_id, from_node_id, to_node_id)
 VALUES ($1, $2, $3)

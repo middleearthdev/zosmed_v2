@@ -15,19 +15,14 @@ import type {
   WorkflowEdge,
   WorkflowNode,
 } from '@zosmed/types';
-import { VALIDATION_FAILURE_MESSAGES, type ValidationFailureReason } from '@zosmed/types';
+import { VALIDATION_FAILURE_MESSAGES, findCatalogEntry, type ValidationFailureReason } from '@zosmed/types';
 import { activateWorkflow, pauseWorkflow, saveWorkflow } from '@/lib/api/workflows';
 import { autoLayoutPosition } from '@/lib/workflow-catalog';
+import { defaultConfigFromSchema } from './inspector/SchemaForm';
 
+/** Seed config for a new node from its catalog schema (single source, §12a DRY). */
 function defaultConfigFor(nodeType: string): Record<string, unknown> {
-  switch (nodeType) {
-    case 'keyword-match':
-      return { keywords: [], caseInsensitive: true };
-    case 'send-whatsapp-link':
-      return { template: 'Halo {{nama}}, makasih udah komen di {{post}}! Yuk lanjut chat di WhatsApp ya 💬', waPhone: '' };
-    default:
-      return {};
-  }
+  return defaultConfigFromSchema(findCatalogEntry(nodeType)?.configSchema);
 }
 
 function newNodeId(): string {
@@ -80,6 +75,9 @@ export interface WorkflowGraphState {
   selectNode: (id: string | null) => void;
   addNode: (entry: NodeCatalogEntry) => void;
   removeNode: (id: string) => void;
+  moveNode: (id: string, x: number, y: number) => void;
+  addEdge: (from: string, to: string) => void;
+  removeEdge: (id: string) => void;
   updateNodeConfig: (id: string, config: Record<string, unknown>) => void;
   renameWorkflow: (name: string) => void;
   save: () => Promise<boolean>;
@@ -134,6 +132,29 @@ export function useWorkflowGraph(initial: Workflow): WorkflowGraphState {
     },
     [],
   );
+
+  const moveNode = useCallback((id: string, x: number, y: number) => {
+    setWorkflow((prev) => ({
+      ...prev,
+      nodes: prev.nodes.map((n) => (n.id === id ? { ...n, position: { x: Math.round(x), y: Math.round(y) } } : n)),
+    }));
+    setDirty(true);
+  }, []);
+
+  const addEdge = useCallback((from: string, to: string) => {
+    if (from === to) return;
+    setWorkflow((prev) => {
+      // No duplicate edges; edge identity is the (from,to) pair (backend UNIQUE).
+      if (prev.edges.some((e) => e.from === from && e.to === to)) return prev;
+      return { ...prev, edges: [...prev.edges, { id: newNodeId(), from, to }] };
+    });
+    setDirty(true);
+  }, []);
+
+  const removeEdge = useCallback((id: string) => {
+    setWorkflow((prev) => ({ ...prev, edges: prev.edges.filter((e) => e.id !== id) }));
+    setDirty(true);
+  }, []);
 
   const updateNodeConfig = useCallback((id: string, config: Record<string, unknown>) => {
     setWorkflow((prev) => ({
@@ -207,6 +228,9 @@ export function useWorkflowGraph(initial: Workflow): WorkflowGraphState {
     selectNode,
     addNode,
     removeNode,
+    moveNode,
+    addEdge,
+    removeEdge,
     updateNodeConfig,
     renameWorkflow,
     save,

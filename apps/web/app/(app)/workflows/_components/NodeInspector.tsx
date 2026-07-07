@@ -1,16 +1,18 @@
 'use client';
 
 /**
- * Right-hand config panel (ADR-004 F5). Renders a dedicated form for the
- * two configurable runnable node kinds (`keyword-match`, `send-whatsapp-link`)
- * and a plain info panel for everything else — config always flows back
- * into canvas state via `onChangeConfig` (never fetched mid-JSX, §12a-3).
+ * Right-hand config panel (ADR-004 F5 → ADR-005 §F4). Fully schema-driven:
+ * renders `SchemaForm` from the selected node's `configSchema` (`@zosmed/types`,
+ * mirrors `libs/workflow/nodes/catalog.go`). Adding a new runnable node needs
+ * NO new inspector code — the catalog schema drives the form (§12a DRY).
+ * Config always flows back into canvas state via `onChangeConfig` (never
+ * fetched mid-JSX, §12a-3 SoC).
  */
-import type { ReactNode } from 'react';
 import { I, type IconName } from '@zosmed/ui';
-import type { KeywordMatchConfig, NodeCatalogEntry, SendWhatsappLinkConfig, WorkflowNode } from '@zosmed/types';
+import type { NodeCatalogEntry, WorkflowNode } from '@zosmed/types';
 import { iconForNodeType, wfTypeForCategory } from '@/lib/workflow-catalog';
 import { NODE_COLORS } from '@/lib/mock/workflows';
+import { SchemaForm } from './inspector/SchemaForm';
 
 export function NodeInspector({
   node,
@@ -25,15 +27,17 @@ export function NodeInspector({
 }) {
   if (!node) {
     return (
-      <div className="border-bg-3 flex w-[320px] flex-col items-center justify-center gap-2 border-l px-6 py-10 text-center">
-        <span className="text-text-3 text-xs">Pilih node di canvas untuk mengatur konfigurasinya.</span>
-        <span className="text-text-3 mono text-[10.5px]">Atau klik salah satu node di palette untuk menambah node baru.</span>
-      </div>
+      <></>
+      // <div className="border-bg-3 flex w-[320px] flex-col items-center justify-center gap-2 border-l px-6 py-10 text-center">
+      //   <span className="text-text-3 text-xs">Pilih node di canvas untuk mengatur konfigurasinya.</span>
+      //   <span className="text-text-3 mono text-[10.5px]">Atau klik salah satu node di palette untuk menambah node baru.</span>
+      // </div>
     );
   }
 
   const color = NODE_COLORS[wfTypeForCategory(node.node.category)];
   const iconKey: IconName = iconForNodeType(node.node.kind);
+  const schema = catalogEntry?.configSchema;
 
   return (
     <div className="border-bg-3 w-[320px] overflow-y-auto border-l px-[18px] py-5">
@@ -68,18 +72,18 @@ export function NodeInspector({
         </div>
       ) : null}
 
-      {node.node.kind === 'keyword-match' ? (
-        <KeywordMatchFields config={node.config as unknown as KeywordMatchConfig} onChange={onChangeConfig} />
-      ) : node.node.kind === 'send-whatsapp-link' ? (
-        <SendWhatsappLinkFields config={node.config as unknown as SendWhatsappLinkConfig} onChange={onChangeConfig} />
+      {schema && schema.length > 0 ? (
+        // key=node.id so uncontrolled inputs remount when a different node is selected.
+        <SchemaForm key={node.id} schema={schema} config={node.config as Record<string, unknown>} onChange={onChangeConfig} />
       ) : (
-        <Field label="KONFIGURASI">
-          <div className="bg-bg-2 border-line rounded-lg border p-3 text-[12.5px] leading-normal text-text-2">
+        <div className="mb-[18px]">
+          <div className="mono tracked text-text-3 mb-2 text-[9.5px]">KONFIGURASI</div>
+          <div className="bg-bg-2 border-line text-text-2 rounded-lg border p-3 text-[12.5px] leading-normal">
             {catalogEntry?.runnable
               ? 'Node ini tidak butuh konfigurasi tambahan — siap dipakai langsung di workflow.'
               : 'Konfigurasi untuk node ini menyusul di iterasi berikutnya.'}
           </div>
-        </Field>
+        </div>
       )}
 
       <div className="bg-bg-3 my-5 h-px" />
@@ -92,89 +96,6 @@ export function NodeInspector({
       >
         Hapus node
       </button>
-    </div>
-  );
-}
-
-function KeywordMatchFields({
-  config,
-  onChange,
-}: {
-  config: KeywordMatchConfig;
-  onChange: (config: Record<string, unknown>) => void;
-}) {
-  const keywords = Array.isArray(config?.keywords) ? config.keywords : [];
-  return (
-    <>
-      <Field label="KATA KUNCI (pisahkan dengan koma)">
-        <textarea
-          defaultValue={keywords.join(', ')}
-          onBlur={(e) => {
-            const next = e.target.value
-              .split(',')
-              .map((k) => k.trim())
-              .filter(Boolean);
-            onChange({ keywords: next });
-          }}
-          rows={3}
-          placeholder="keep, c1, c3, order"
-          className="bg-bg-2 border-line text-text placeholder:text-text-3 w-full rounded-lg border p-3 text-[13px] leading-normal outline-none focus:border-lime"
-        />
-      </Field>
-      <Field label="MODE PENCOCOKAN">
-        <label className="bg-bg-2 border-line flex items-center gap-2 rounded-md border px-2.5 py-2 text-xs">
-          <input
-            type="checkbox"
-            defaultChecked={config?.caseInsensitive ?? true}
-            onChange={(e) => onChange({ caseInsensitive: e.target.checked })}
-          />
-          Abaikan besar/kecil huruf (case insensitive)
-        </label>
-      </Field>
-    </>
-  );
-}
-
-function SendWhatsappLinkFields({
-  config,
-  onChange,
-}: {
-  config: SendWhatsappLinkConfig;
-  onChange: (config: Record<string, unknown>) => void;
-}) {
-  return (
-    <>
-      <Field label="TEMPLATE PESAN">
-        <textarea
-          defaultValue={config?.template ?? ''}
-          onBlur={(e) => onChange({ template: e.target.value })}
-          rows={5}
-          placeholder="Halo {{nama}}, makasih udah komen di {{post}}! Yuk lanjut chat di WhatsApp ya 💬"
-          className="bg-bg-2 border-line text-text placeholder:text-text-3 w-full rounded-lg border p-3 text-[13px] leading-normal outline-none focus:border-lime"
-        />
-        <span className="mono text-text-3 mt-1.5 block text-[10.5px]">
-          Variabel: {'{{nama}}'} · {'{{produk}}'} · {'{{post}}'}
-        </span>
-      </Field>
-      <Field label="NOMOR WHATSAPP TUJUAN">
-        <input
-          type="text"
-          defaultValue={config?.waPhone ?? ''}
-          onBlur={(e) => onChange({ waPhone: e.target.value })}
-          placeholder="6281234567890"
-          className="bg-bg-2 border-line text-text placeholder:text-text-3 w-full rounded-lg border px-3 py-2.5 text-sm outline-none focus:border-lime"
-        />
-        <span className="mono text-text-3 mt-1.5 block text-[10.5px]">Format internasional, tanpa tanda &quot;+&quot;.</span>
-      </Field>
-    </>
-  );
-}
-
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="mb-[18px]">
-      <div className="mono tracked text-text-3 mb-2 text-[9.5px]">{label}</div>
-      {children}
     </div>
   );
 }

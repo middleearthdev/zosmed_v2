@@ -104,6 +104,45 @@ export interface RunSummary {
 /** Union semua `node_type` feasible di seluruh kategori. */
 export type AnyNodeType = TriggerKind | FilterKind | ActionKind;
 
+// ── Config-schema (inspector schema-driven, ADR-005 §R5/§F4) ────────────────
+
+/**
+ * Jenis kontrol yang dirender inspector (`SchemaForm`). Ini MURNI concern
+ * render frontend (ADR-005 opsi-1): Go tidak lagi menyimpan schema. Beberapa
+ * jenis sengaja "ramah pengguna" dan menyembunyikan format teknis yang
+ * dibutuhkan backend — konversi terjadi di dalam kontrol, bukan di kepala user:
+ *
+ * - `time`     → input jam:menit, DISIMPAN sebagai menit sejak 00:00 (number)
+ * - `weekdays` → toggle hari, DISIMPAN sebagai nomor hari string ("0"=Min … "6"=Sab)
+ * - `phone`    → input nomor, DINORMALISASI ke digit E.164 (awalan 0 → 62)
+ * - `list`     → input chip (ketik lalu Enter), DISIMPAN sebagai string[]
+ *
+ * Nilai yang dihasilkan tetap cocok dengan yang divalidasi node Go di
+ * `Factory.Build` (mis. filter_time_window menerima menit + nomor hari).
+ */
+export type FieldKind = 'text' | 'textarea' | 'list' | 'select' | 'boolean' | 'time' | 'weekdays' | 'phone';
+
+/** Satu pilihan untuk field bertipe `select`. */
+export interface FieldOption {
+  value: string;
+  label: string;
+}
+
+/** Deskripsi satu field config sebuah node untuk inspector builder (FE-only). */
+export interface FieldSchema {
+  key: string;
+  type: FieldKind;
+  label: string;
+  required?: boolean;
+  /** Kalimat pendukung singkat & ramah (hindari jargon/angka teknis). */
+  help?: string;
+  placeholder?: string;
+  /** Hanya bermakna saat `type === 'select'`. */
+  options?: FieldOption[];
+  /** Nilai awal saat node baru ditambahkan dari palette (seed FE saja). */
+  default?: unknown;
+}
+
 /**
  * Satu entri katalog node. Statik di FE — mirror `libs/workflow/nodes/catalog.go`
  * (ADR-004 R7, pola sama `KIT_KEYWORDS`). TIDAK ada endpoint `/node-catalog`
@@ -121,13 +160,20 @@ export interface NodeCatalogEntry {
   description: string;
   /** false = tampil di palette dengan badge "segera", disabled untuk drag/aktivasi. */
   runnable: boolean;
+  /**
+   * Schema config yang dirender inspector (ADR-005 §R5). Ada untuk node
+   * runnable yang punya config user-facing; `undefined` untuk node tanpa
+   * config atau yang belum pindah ke form schema-driven.
+   */
+  configSchema?: FieldSchema[];
 }
 
 /**
- * Katalog node feasible §7, subset runnable = ADR-004 §5 iterasi 1:
- * `comment-received`, `comment-to-order` (trigger); `keyword-match` (filter);
- * `send-whatsapp-link`, `reserve-stock` (action). Sisanya tampil tapi
- * non-runnable ("segera") — R6.
+ * Katalog node feasible §7. Subset runnable (ADR-004 §5 + ADR-005 §1):
+ * trigger `comment-received`, `comment-to-order`; filter `keyword-match`,
+ * `post-selection`, `time-window`; action `send-whatsapp-link`,
+ * `reserve-stock`, `reply-comment`, `outbound-webhook`. Sisanya tampil tapi
+ * non-runnable ("segera") sampai subsystem-nya ada (ADR-005 §1 klasifikasi B).
  */
 export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
   // Triggers
@@ -180,6 +226,16 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     label: 'Cocokkan kata kunci',
     description: 'Lanjut hanya jika teks mengandung salah satu kata kunci.',
     runnable: true,
+    configSchema: [
+      {
+        key: 'keywords',
+        type: 'list',
+        label: 'Kata yang dipantau',
+        help: 'Workflow lanjut kalau komentar memuat salah satu kata ini. Kosongkan untuk semua komentar.',
+        placeholder: 'ketik kata lalu Enter — mis. keep, order, mau',
+        default: [],
+      },
+    ],
   },
   {
     category: 'filter',
@@ -200,14 +256,46 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     nodeType: 'post-selection',
     label: 'Pilih post tertentu',
     description: 'Filter berdasarkan post/Reel asal komentar.',
-    runnable: false,
+    runnable: true,
+    configSchema: [
+      {
+        key: 'mediaIds',
+        type: 'list',
+        label: 'Batasi ke post/Reel tertentu',
+        help: 'Opsional. Biarkan kosong supaya berlaku di semua post. Isi ID post kalau mau membatasi.',
+        placeholder: 'tempel ID post lalu Enter',
+        default: [],
+      },
+    ],
   },
   {
     category: 'filter',
     nodeType: 'time-window',
     label: 'Jendela waktu',
     description: 'Lanjut hanya pada rentang waktu tertentu.',
-    runnable: false,
+    runnable: true,
+    configSchema: [
+      {
+        key: 'days',
+        type: 'weekdays',
+        label: 'Hari aktif',
+        help: 'Pilih hari workflow ini boleh jalan. Tidak dipilih = setiap hari.',
+        default: [],
+      },
+      { key: 'startMinute', type: 'time', label: 'Mulai jam' },
+      { key: 'endMinute', type: 'time', label: 'Sampai jam' },
+      {
+        key: 'timezone',
+        type: 'select',
+        label: 'Zona waktu',
+        default: 'Asia/Jakarta',
+        options: [
+          { value: 'Asia/Jakarta', label: 'WIB (Jakarta)' },
+          { value: 'Asia/Makassar', label: 'WITA (Makassar)' },
+          { value: 'Asia/Jayapura', label: 'WIT (Jayapura)' },
+        ],
+      },
+    ],
   },
   // Actions
   {
@@ -215,7 +303,16 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     nodeType: 'reply-comment',
     label: 'Balas komentar publik',
     description: 'Kirim balasan publik ke komentar (rate-limited).',
-    runnable: false,
+    runnable: true,
+    configSchema: [
+      {
+        key: 'template',
+        type: 'textarea',
+        label: 'Balasan otomatis',
+        help: 'Ketik {nama} untuk menyapa nama pengomennya. Kosongkan untuk pakai balasan bawaan.',
+        placeholder: 'Halo kak {nama}, cek DM ya 🙏',
+      },
+    ],
   },
   {
     category: 'action',
@@ -235,8 +332,25 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     category: 'action',
     nodeType: 'send-whatsapp-link',
     label: 'Kirim link WhatsApp',
-    description: 'Private reply berisi link wa.me terisi otomatis (nama/produk/post).',
+    description: 'Private reply berisi link wa.me terisi otomatis.',
     runnable: true,
+    configSchema: [
+      {
+        key: 'phone',
+        type: 'phone',
+        label: 'Nomor WhatsApp tujuan',
+        required: true,
+        help: 'Nomor admin untuk closing. Boleh tulis 0812… atau 62812…',
+        placeholder: '0812 3456 7890',
+      },
+      {
+        key: 'template',
+        type: 'textarea',
+        label: 'Pesan pembuka',
+        help: 'Ketik {nama} untuk nama pengomen, {wa_link} untuk link WhatsApp-nya.',
+        default: 'Halo kak {nama}! Yuk lanjut ngobrol di WhatsApp ya: {wa_link}',
+      },
+    ],
   },
   {
     category: 'action',
@@ -278,7 +392,12 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     nodeType: 'outbound-webhook',
     label: 'Webhook keluar',
     description: 'Kirim event ke backend eksternal milik pengguna.',
-    runnable: false,
+    runnable: true,
+    configSchema: [
+      { key: 'url', type: 'text', label: 'URL tujuan', required: true, help: 'Alamat https server kamu yang menerima data event.', placeholder: 'https://…' },
+      { key: 'includeSignature', type: 'boolean', label: 'Tanda tangani request (HMAC)' },
+      { key: 'secret', type: 'text', label: 'Secret', help: 'Kunci untuk verifikasi tanda tangan. Isi kalau tanda tangan diaktifkan.' },
+    ],
   },
 ] as const;
 
@@ -294,16 +413,49 @@ export function findCatalogEntry(nodeType: string): NodeCatalogEntry | undefined
 
 // ── Node config shapes (per node kind, ADR-004 catatan integrasi) ──────────
 
-/** Config `keyword-match` filter. */
+/** Config `keyword-match` filter. `caseInsensitive` disembunyikan dari UI (default true di Go). */
 export interface KeywordMatchConfig {
   keywords: string[];
-  caseInsensitive: boolean;
+  caseInsensitive?: boolean;
 }
 
-/** Config `send-whatsapp-link` action. */
+/**
+ * Config `send-whatsapp-link` action. Nama field selaras struct Go
+ * `sendWhatsAppLinkConfig` (`libs/workflow/nodes/action_wa_link.go`): key
+ * `phone` (bukan `waPhone`) dan placeholder template `{nama}`/`{wa_link}`.
+ */
 export interface SendWhatsappLinkConfig {
-  /** Template teks; mendukung variabel {{nama}}, {{produk}}, {{post}}. */
+  /** Nomor WhatsApp tujuan, format internasional tanpa "+" (mis. "6281234567890"). */
+  phone: string;
+  /** Template teks; placeholder {nama}, {wa_link}. */
+  template?: string;
+}
+
+/** Config `post-selection` filter (ADR-005 §2.1). Kosong = izinkan semua post/Reel. */
+export interface PostSelectionConfig {
+  /** ID media Instagram yang diizinkan. */
+  mediaIds: string[];
+}
+
+/** Config `time-window` filter (ADR-005 §2.2). Kosong = setiap hari, setiap waktu. */
+export interface TimeWindowConfig {
+  /** Nomor hari time.Weekday sebagai string ("0"=Minggu … "6"=Sabtu). */
+  days?: string[];
+  /** Menit sejak tengah malam lokal [0,1439], inklusif. */
+  startMinute?: number;
+  endMinute?: number;
+  /** IANA tz; default "Asia/Jakarta" (WIB). */
+  timezone?: string;
+}
+
+/** Config `reply-comment` action (ADR-005 §2.3). Placeholder: {nama}. */
+export interface ReplyCommentConfig {
   template: string;
-  /** Nomor WhatsApp tujuan format internasional tanpa "+" (mis. "6281234567890"). */
-  waPhone: string;
+}
+
+/** Config `outbound-webhook` action (ADR-005 §2.4). URL non-IG, ber-guard SSRF di backend. */
+export interface OutboundWebhookConfig {
+  url: string;
+  includeSignature?: boolean;
+  secret?: string;
 }

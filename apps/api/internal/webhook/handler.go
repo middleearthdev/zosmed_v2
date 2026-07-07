@@ -84,7 +84,8 @@ func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request) {
 //  2. Verify X-Hub-Signature-256 — 403 on failure, no processing.
 //  3. Unmarshal payload; extract comment events.
 //  4. Per comment: dedupe via processed_comment (ON CONFLICT DO NOTHING; 0 rows → skip).
-//  5. Filter: skip enqueue if media_id not in active catalog.
+//  5. Filter (ADR-005 §3 B1): skip enqueue unless media_id is in an active
+//     catalog post OR the account has ≥1 `live` workflow.
 //  6. EnqueueCommentIngest for the worker.
 //  7. Respond 200 ASAP — processing is asynchronous.
 func (h *Handler) Receive(w http.ResponseWriter, r *http.Request) {
@@ -180,17 +181,32 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 		return nil
 	}
 
-	// Step 6: cheap filter — only enqueue if the media is in an active catalog post.
+	// Step 6 (ADR-005 §3 B1 — ingest decoupling): enqueue when EITHER the media
+	// is a registered/active catalog post (legacy seller pre-screen, ADR-001)
+	// OR the account has at least one generic `live` workflow (comment-received
+	// → ... → action, ADR-005 §2). This is what makes a workflow like
+	// [comment-received → reply-comment] reachable on ordinary comments that
+	// carry no keep code and sit on a non-catalog post — comment_ingest.go
+	// (apps/worker) does the actual trigger/filter matching; this is only a
+	// cheap existence check to decide whether the event is worth enqueueing
+	// at all.
 	_, err = h.queries.GetActiveCatalogPostByMedia(ctx, dbgen.GetActiveCatalogPostByMediaParams{
 		IgMediaID: v.Media.ID,
 		AccountID: accountID,
 	})
-	if err != nil {
-		// pgx "no rows" or any other error means media is not registered / not active.
-		h.log.Debug("webhook: media not in active catalog — skip enqueue",
-			slog.String("media_id", v.Media.ID),
-		)
-		return nil
+	inActiveCatalog := err == nil
+
+	if !inActiveCatalog {
+		hasLive, err := h.queries.HasLiveWorkflow(ctx, accountID)
+		if err != nil {
+			return fmt.Errorf("webhook: check live workflow: %w", err)
+		}
+		if !hasLive {
+			h.log.Debug("webhook: media not in active catalog and no live workflow — skip enqueue",
+				slog.String("media_id", v.Media.ID),
+			)
+			return nil
+		}
 	}
 
 	// Capture the comment time now (M4): the webhook entry timestamp, or the

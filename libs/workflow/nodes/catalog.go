@@ -7,9 +7,17 @@ package nodes
 
 import "github.com/zosmed/zosmed/libs/workflow"
 
-// Node type identifiers — single source of truth for the feasible node
-// catalog (CLAUDE.md §7, ADR-004 §5). The frontend keeps a mirrored TS
-// constant (packages/types) in sync per §12a-1; this Go file is authoritative.
+// Node type identifiers — the authoritative list of feasible node types
+// (CLAUDE.md §7, ADR-004 §5). The frontend mirrors these string ids in
+// packages/types (AnyNodeType) per §12a-1.
+//
+// NOTE (ADR-005): the *config schema* that drives the builder's inspector form
+// lives only in the frontend (packages/types/src/workflow.ts) — it is a pure
+// render concern. Go does NOT hold a schema; each node validates its own config
+// VALUES in Factory.Build (e.g. action_outbound_webhook rejects unsafe URLs,
+// filter_time_window rejects out-of-range weekdays). This split keeps the
+// friendly, UI-shaped schema (time pickers, weekday toggles) out of the
+// backend while value-validation stays authoritative where the value is used.
 const (
 	NodeTypeCommentReceived = "comment-received"
 	NodeTypeCommentToOrder  = "comment-to-order"
@@ -37,11 +45,11 @@ const (
 )
 
 // CatalogEntry describes one node_type in the feasible palette (CLAUDE.md
-// §7). Runnable marks whether iteration 1's runtime (compiler + factory map)
+// §7). Runnable marks whether the current runtime (compiler + factory map)
 // can actually execute the node; non-runnable entries are palette-only until
-// their ingest path or supporting service exists (ADR-004 §Non-Scope) —
-// activate-time validation rejects a workflow that depends on one of these
-// as its only trigger (reason "trigger_not_runnable", §3).
+// their ingest path or supporting service exists (ADR-004 §Non-Scope,
+// ADR-005 §1) — activate-time validation rejects a workflow that depends on
+// one of these as its only trigger (reason "trigger_not_runnable", §3).
 type CatalogEntry struct {
 	Category workflow.NodeKind
 	NodeType string
@@ -67,10 +75,10 @@ var Catalog = []CatalogEntry{
 	{Category: workflow.KindFilter, NodeType: NodeTypeKeywordMatch, Label: "Cocokkan kata kunci", IconKey: "search", Runnable: true},
 	{Category: workflow.KindFilter, NodeType: NodeTypeConversationState, Label: "Status percakapan (window 24 jam)", IconKey: "clock", Runnable: false},
 	{Category: workflow.KindFilter, NodeType: NodeTypeIntent, Label: "Deteksi intent (ragu/trust)", IconKey: "help-circle", Runnable: false},
-	{Category: workflow.KindFilter, NodeType: NodeTypePostSelection, Label: "Pilih post/Reel", IconKey: "image", Runnable: false},
-	{Category: workflow.KindFilter, NodeType: NodeTypeTimeWindow, Label: "Jendela waktu", IconKey: "calendar", Runnable: false},
+	{Category: workflow.KindFilter, NodeType: NodeTypePostSelection, Label: "Pilih post/Reel", IconKey: "image", Runnable: true},
+	{Category: workflow.KindFilter, NodeType: NodeTypeTimeWindow, Label: "Jendela waktu", IconKey: "calendar", Runnable: true},
 
-	{Category: workflow.KindAction, NodeType: NodeTypeReplyComment, Label: "Balas komentar", IconKey: "message-circle", Runnable: false},
+	{Category: workflow.KindAction, NodeType: NodeTypeReplyComment, Label: "Balas komentar", IconKey: "message-circle", Runnable: true},
 	{Category: workflow.KindAction, NodeType: NodeTypeSendDM, Label: "Kirim DM", IconKey: "send", Runnable: false},
 	{Category: workflow.KindAction, NodeType: NodeTypeAIReply, Label: "Balasan AI", IconKey: "sparkles", Runnable: false},
 	{Category: workflow.KindAction, NodeType: NodeTypeSendWhatsAppLink, Label: "Kirim link WhatsApp", IconKey: "whatsapp", Runnable: true},
@@ -79,7 +87,7 @@ var Catalog = []CatalogEntry{
 	{Category: workflow.KindAction, NodeType: NodeTypeNotifyOptin, Label: "Notifikasi opt-in", IconKey: "bell", Runnable: false},
 	{Category: workflow.KindAction, NodeType: NodeTypeHandoffHuman, Label: "Alihkan ke admin", IconKey: "user", Runnable: false},
 	{Category: workflow.KindAction, NodeType: NodeTypeTagContact, Label: "Tandai kontak", IconKey: "tag", Runnable: false},
-	{Category: workflow.KindAction, NodeType: NodeTypeOutboundWebhook, Label: "Webhook keluar", IconKey: "webhook", Runnable: false},
+	{Category: workflow.KindAction, NodeType: NodeTypeOutboundWebhook, Label: "Webhook keluar", IconKey: "webhook", Runnable: true},
 }
 
 // byNodeType indexes Catalog once at package init for O(1) Lookup.

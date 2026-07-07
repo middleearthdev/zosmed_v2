@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -65,16 +66,21 @@ func marshalPayload(t *testing.T, p MetaPayload) []byte {
 // ── fakeDedupeDTBX ───────────────────────────────────────────────────────────
 
 // fakeDedupeDTBX is a minimal dbgen.DBTX stub for testing the
-// account-resolution (ADR-002 §6.1) + dedupe path:
+// account-resolution (ADR-002 §6.1) + dedupe + ingest-decoupling (ADR-005 §3
+// B1) path:
 //
-//	GetAccountByIgUserID (QueryRow) → InsertProcessedComment (Exec)
+//	GetAccountByIgUserID (QueryRow) → InsertProcessedComment (Exec) →
+//	GetActiveCatalogPostByMedia (QueryRow) → HasLiveWorkflow (QueryRow)
 //
-// accountFound controls the QueryRow leg: true → scans a fixed "connected"
-// account row so the flow proceeds to Exec; false → pgx.ErrNoRows, modelling
-// an unknown IGSID (AC-9: must skip safely, never 500).
+// accountFound controls the account-lookup QueryRow leg: true → scans a
+// fixed "connected" account row so the flow proceeds to Exec; false →
+// pgx.ErrNoRows, modelling an unknown IGSID (AC-9: must skip safely, never
+// 500). catalogFound / hasLiveWorkflow / hasLiveWorkflowErr control the two
+// legs added by ADR-005 §3 B1's OR-based enqueue guard.
 //
-// Only Exec and the account-lookup QueryRow are exercised on the paths under
-// test below; Query is never reached, so it panics to surface accidental use.
+// QueryRow dispatches on the (stable, sqlc-generated) SQL text — same
+// pattern as apps/api/internal/auth/fakedb_test.go — so only the queries a
+// given test actually reaches need a configured response; anything else panics.
 type fakeDedupeDTBX struct {
 	execTag      pgconn.CommandTag
 	execErr      error
@@ -82,6 +88,14 @@ type fakeDedupeDTBX struct {
 	// accountScanErr, when non-nil, is returned by the GetAccountByIgUserID
 	// QueryRow scan to model a real DB failure (not ErrNoRows) — see M1.
 	accountScanErr error
+
+	// catalogFound controls GetActiveCatalogPostByMedia: true → a row is
+	// "found" (Scan succeeds, contents unused by the caller); false →
+	// pgx.ErrNoRows (media not registered / not active).
+	catalogFound bool
+	// hasLiveWorkflow / hasLiveWorkflowErr control HasLiveWorkflow (ADR-005 B1).
+	hasLiveWorkflow    bool
+	hasLiveWorkflowErr error
 }
 
 func (f *fakeDedupeDTBX) Exec(_ context.Context, _ string, _ ...interface{}) (pgconn.CommandTag, error) {
@@ -93,10 +107,47 @@ func (f *fakeDedupeDTBX) Query(_ context.Context, _ string, _ ...interface{}) (p
 	panic("fakeDedupeDTBX.Query: unexpected call — wrong code path in handler test")
 }
 
-// QueryRow backs GetAccountByIgUserID. It returns a fakeAccountRow whose
-// Scan behaviour is controlled by accountFound.
-func (f *fakeDedupeDTBX) QueryRow(_ context.Context, _ string, _ ...interface{}) pgx.Row {
-	return &fakeAccountRow{found: f.accountFound, scanErr: f.accountScanErr}
+// QueryRow dispatches by SQL text to the account/catalog/live-workflow
+// lookups exercised by processComment.
+func (f *fakeDedupeDTBX) QueryRow(_ context.Context, sql string, _ ...interface{}) pgx.Row {
+	switch {
+	case strings.Contains(sql, "FROM account WHERE ig_user_id"):
+		return &fakeAccountRow{found: f.accountFound, scanErr: f.accountScanErr}
+	case strings.Contains(sql, "FROM catalog_post"):
+		if !f.catalogFound {
+			return &fakeErrRow{err: pgx.ErrNoRows}
+		}
+		return &fakeErrRow{err: nil} // caller discards the scanned CatalogPost value
+	case strings.Contains(sql, "status = 'live'"):
+		return &fakeBoolRow{val: f.hasLiveWorkflow, err: f.hasLiveWorkflowErr}
+	}
+	panic("fakeDedupeDTBX.QueryRow: unhandled query: " + sql)
+}
+
+// fakeErrRow implements pgx.Row, always failing (or succeeding, if err is
+// nil) Scan with a fixed result — used to model "not found" / "found but
+// unused" QueryRow outcomes without needing per-query row shapes.
+type fakeErrRow struct{ err error }
+
+func (r *fakeErrRow) Scan(_ ...interface{}) error { return r.err }
+
+// fakeBoolRow implements pgx.Row for the single-bool-column HasLiveWorkflow
+// query (ADR-005 §3 B1).
+type fakeBoolRow struct {
+	val bool
+	err error
+}
+
+func (r *fakeBoolRow) Scan(dest ...interface{}) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) > 0 {
+		if p, ok := dest[0].(*bool); ok {
+			*p = r.val
+		}
+	}
+	return nil
 }
 
 // fakeAccountRow implements pgx.Row for the GetAccountByIgUserID scan. It
@@ -458,6 +509,143 @@ func TestProcessComment_RealDBError_NotSwallowed(t *testing.T) {
 	if !errors.Is(err, dbErr) {
 		t.Errorf("expected wrapped DB error, got %v", err)
 	}
+}
+
+// ── ADR-005 §3 B1: ingest decoupling (OR-based enqueue guard) ────────────────
+
+// TestProcessComment_NotInCatalogNoLiveWorkflow_SkipsSafely verifies the
+// pre-decoupling behaviour is preserved: a comment on a media_id that is
+// NEITHER in an active catalog post NOR backed by any `live` workflow is
+// still skipped safely (no enqueue attempt, no error).
+func TestProcessComment_NotInCatalogNoLiveWorkflow_SkipsSafely(t *testing.T) {
+	fakeDB := &fakeDedupeDTBX{
+		execTag:         pgconn.NewCommandTag("INSERT 0 1"),
+		accountFound:    true,
+		catalogFound:    false,
+		hasLiveWorkflow: false,
+	}
+	queries := dbgen.New(fakeDB)
+	h := makeHandler(t, "secret", "tok", queries)
+
+	ic := IngestComment{
+		EntryID: "igsid-1",
+		Value: CommentValue{
+			ID:    "cmt-skip-001",
+			Text:  "halo kak, cakep banget",
+			From:  CommentFrom{ID: "u1", Username: "buyer"},
+			Media: CommentMedia{ID: "media-non-catalog"},
+		},
+	}
+
+	if err := h.processComment(context.Background(), ic); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	// h.enq is nil (see makeHandler) — not panicking proves EnqueueCommentIngest
+	// was never reached, i.e. the comment was skipped as before ADR-005.
+}
+
+// TestProcessComment_NotInCatalogButHasLiveWorkflow_ReachesEnqueue proves the
+// new OR branch (ADR-005 §3 B1): a comment on a non-catalog post still
+// reaches the enqueue step once the account has ≥1 `live` workflow — this is
+// what makes a generic [comment-received → reply-comment] workflow reachable
+// on ordinary comments. h.enq is nil in this test harness (BUG-001, see file
+// docstring), so reaching EnqueueCommentIngest panics with a nil-pointer
+// dereference; that panic IS the proof (the skip branch above returns
+// cleanly instead).
+func TestProcessComment_NotInCatalogButHasLiveWorkflow_ReachesEnqueue(t *testing.T) {
+	fakeDB := &fakeDedupeDTBX{
+		execTag:         pgconn.NewCommandTag("INSERT 0 1"),
+		accountFound:    true,
+		catalogFound:    false,
+		hasLiveWorkflow: true,
+	}
+	queries := dbgen.New(fakeDB)
+	h := makeHandler(t, "secret", "tok", queries)
+
+	ic := IngestComment{
+		EntryID: "igsid-1",
+		Value: CommentValue{
+			ID:    "cmt-live-001",
+			Text:  "halo kak, boleh tanya-tanya?",
+			From:  CommentFrom{ID: "u1", Username: "buyer"},
+			Media: CommentMedia{ID: "media-non-catalog"},
+		},
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected a nil-enqueuer panic proving the OR branch reached EnqueueCommentIngest")
+		}
+	}()
+	_ = h.processComment(context.Background(), ic)
+	t.Fatal("expected panic before reaching this line")
+}
+
+// TestProcessComment_HasLiveWorkflowDBError_NotSwallowed guards the same M1
+// discipline as TestProcessComment_RealDBError_NotSwallowed, but for the new
+// HasLiveWorkflow leg: a real DB failure must surface as an error, not be
+// silently treated as "no live workflow".
+func TestProcessComment_HasLiveWorkflowDBError_NotSwallowed(t *testing.T) {
+	dbErr := errors.New("redis-like transient failure")
+	fakeDB := &fakeDedupeDTBX{
+		execTag:            pgconn.NewCommandTag("INSERT 0 1"),
+		accountFound:       true,
+		catalogFound:       false,
+		hasLiveWorkflowErr: dbErr,
+	}
+	queries := dbgen.New(fakeDB)
+	h := makeHandler(t, "secret", "tok", queries)
+
+	ic := IngestComment{
+		EntryID: "igsid-1",
+		Value: CommentValue{
+			ID:    "cmt-hlw-err-001",
+			Text:  "halo kak",
+			From:  CommentFrom{ID: "u1", Username: "buyer"},
+			Media: CommentMedia{ID: "media-x"},
+		},
+	}
+
+	err := h.processComment(context.Background(), ic)
+	if err == nil {
+		t.Fatal("expected error when HasLiveWorkflow fails, got nil")
+	}
+	if !errors.Is(err, dbErr) {
+		t.Errorf("expected wrapped DB error, got %v", err)
+	}
+}
+
+// TestProcessComment_InCatalog_SkipsLiveWorkflowCheck verifies the catalog
+// leg still short-circuits the OR: when the media IS in an active catalog
+// post, HasLiveWorkflow must never be queried (hasLiveWorkflowErr would
+// panic the fake if reached, since no query text matches — proving the
+// legacy seller pre-screen path is untouched by ADR-005 §3 B1).
+func TestProcessComment_InCatalog_SkipsLiveWorkflowCheck(t *testing.T) {
+	fakeDB := &fakeDedupeDTBX{
+		execTag:      pgconn.NewCommandTag("INSERT 0 1"),
+		accountFound: true,
+		catalogFound: true,
+	}
+	queries := dbgen.New(fakeDB)
+	h := makeHandler(t, "secret", "tok", queries)
+
+	ic := IngestComment{
+		EntryID: "igsid-1",
+		Value: CommentValue{
+			ID:    "cmt-catalog-001",
+			Text:  "keep C1",
+			From:  CommentFrom{ID: "u1", Username: "buyer"},
+			Media: CommentMedia{ID: "media-catalog"},
+		},
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected a nil-enqueuer panic proving the catalog branch reached EnqueueCommentIngest")
+		}
+	}()
+	_ = h.processComment(context.Background(), ic)
+	t.Fatal("expected panic before reaching this line")
 }
 
 // ── §4b Regression guards ─────────────────────────────────────────────────────
