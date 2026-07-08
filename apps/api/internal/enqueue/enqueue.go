@@ -34,3 +34,18 @@ func (e *Client) EnqueueCommentIngest(ctx context.Context, p tasks.CommentIngest
 	}
 	return nil
 }
+
+// EnqueueDMIngest enqueues a TaskDMIngest for the worker to process (ADR-006
+// §3.3 step 4). Called by the webhook handler after account resolution,
+// dedupe, and the HasLiveWorkflow gate.
+func (e *Client) EnqueueDMIngest(ctx context.Context, p tasks.DMIngestPayload) error {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("enqueue: marshal dm ingest: %w", err)
+	}
+	_, err = e.c.EnqueueContext(ctx, asynq.NewTask(tasks.TaskDMIngest, b))
+	if err != nil {
+		return fmt.Errorf("enqueue: dm ingest task: %w", err)
+	}
+	return nil
+}

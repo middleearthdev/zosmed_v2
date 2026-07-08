@@ -169,11 +169,13 @@ export interface NodeCatalogEntry {
 }
 
 /**
- * Katalog node feasible §7. Subset runnable (ADR-004 §5 + ADR-005 §1):
- * trigger `comment-received`, `comment-to-order`; filter `keyword-match`,
- * `post-selection`, `time-window`; action `send-whatsapp-link`,
- * `reserve-stock`, `reply-comment`, `outbound-webhook`. Sisanya tampil tapi
- * non-runnable ("segera") sampai subsystem-nya ada (ADR-005 §1 klasifikasi B).
+ * Katalog node feasible §7. Subset runnable (ADR-004 §5 + ADR-005 §1 + ADR-006 §6.2 F1):
+ * trigger `comment-received`, `comment-to-order`, `dm-received`, `story-reply`,
+ * `story-mention`, `click-to-dm-ad`; filter `keyword-match`, `post-selection`,
+ * `time-window`, `conversation-state`; action `send-whatsapp-link`,
+ * `reserve-stock`, `reply-comment`, `outbound-webhook`, `send-dm`. Sisanya tampil
+ * tapi non-runnable ("segera") sampai subsystem-nya ada (ADR-005 §1 / ADR-006 §0
+ * Non-Scope: intent, ai-reply, send-trust-kit, notify-optin, handoff-human, tag-contact).
  */
 export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
   // Triggers
@@ -196,28 +198,37 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     nodeType: 'dm-received',
     label: 'DM IG masuk',
     description: 'Trigger saat user memulai DM duluan.',
-    runnable: false,
+    runnable: true,
   },
   {
     category: 'trigger',
     nodeType: 'story-reply',
     label: 'Balasan Story',
     description: 'Trigger saat user membalas Story (membuka window 24 jam).',
-    runnable: false,
+    runnable: true,
   },
   {
     category: 'trigger',
     nodeType: 'story-mention',
     label: 'Mention di Story',
-    description: 'Trigger saat akun di-mention di Story orang lain.',
-    runnable: false,
+    description: 'Trigger saat akun di-mention di Story orang lain (membuka window 24 jam).',
+    runnable: true,
   },
   {
     category: 'trigger',
     nodeType: 'click-to-dm-ad',
     label: 'Klik iklan Click-to-DM',
     description: 'Trigger dari entry point iklan yang membuka percakapan.',
-    runnable: false,
+    runnable: true,
+    configSchema: [
+      {
+        key: 'adRef',
+        type: 'text',
+        label: 'Ref iklan (opsional)',
+        help: 'Isi kalau mau membatasi trigger ini ke iklan Click-to-DM tertentu. Kosongkan supaya berlaku untuk semua klik iklan.',
+        placeholder: 'kode referral iklan (opsional)',
+      },
+    ],
   },
   // Filters
   {
@@ -242,7 +253,16 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     nodeType: 'conversation-state',
     label: 'Status percakapan',
     description: 'Cek apakah percakapan masih dalam window 24 jam.',
-    runnable: false,
+    runnable: true,
+    configSchema: [
+      {
+        key: 'requireOpen',
+        type: 'boolean',
+        label: 'Wajib chat masih aktif',
+        help: 'Hanya lanjut kalau chat masih aktif (kurang dari 24 jam). Matikan kalau justru mau lanjut saat chat-nya sudah lewat 24 jam.',
+        default: true,
+      },
+    ],
   },
   {
     category: 'filter',
@@ -319,7 +339,17 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     nodeType: 'send-dm',
     label: 'Kirim DM',
     description: 'Kirim direct message (window 24 jam).',
-    runnable: false,
+    runnable: true,
+    configSchema: [
+      {
+        key: 'template',
+        type: 'textarea',
+        label: 'Isi pesan DM',
+        help: 'Ketik {nama} untuk menyapa kontaknya. Penting: node ini cuma bisa kirim kalau ada percakapan DM/Story yang masih dalam window 24 jam terakhir — dipasang di workflow yang dipicu dari komentar, node ini otomatis di-skip (nggak ngirim apa-apa).',
+        placeholder: 'Halo kak {nama}, makasih ya sudah chat! Ada yang bisa dibantu?',
+        default: 'Halo kak {nama}, makasih ya sudah chat! Ada yang bisa dibantu?',
+      },
+    ],
   },
   {
     category: 'action',
@@ -458,4 +488,34 @@ export interface OutboundWebhookConfig {
   url: string;
   includeSignature?: boolean;
   secret?: string;
+}
+
+/**
+ * Config `click-to-dm-ad` trigger (ADR-006 §2.1). Field name selaras struct Go
+ * factory (`libs/workflow/nodes/trigger_click_to_dm_ad.go`): key `adRef`.
+ * Kosong/absen = match semua event ad-referral (tak difilter per iklan).
+ */
+export interface ClickToDmAdConfig {
+  /** Ref iklan opsional untuk membatasi trigger ke satu Click-to-DM ad tertentu. */
+  adRef?: string;
+}
+
+/**
+ * Config `conversation-state` filter (ADR-006 §2.2). Field name selaras struct
+ * Go (`libs/workflow/nodes/filter_conversation_state.go`): key `requireOpen`.
+ * Default `true` — lanjut hanya kalau window 24 jam masih terbuka.
+ */
+export interface ConversationStateConfig {
+  requireOpen?: boolean;
+}
+
+/**
+ * Config `send-dm` action (ADR-006 §2.3). Field name selaras struct Go
+ * (`libs/workflow/nodes/action_send_dm.go`): key `template`, placeholder
+ * `{nama}` (sama pola `ReplyCommentConfig`). Node ini hanya mengirim saat
+ * `Event.Raw[last_interaction_at]` terisi (flow DM/Story, window 24 jam) —
+ * pada flow comment-triggered ia selalu skip (ADR-006 R4, AC-6).
+ */
+export interface SendDmConfig {
+  template?: string;
 }

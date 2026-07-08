@@ -128,6 +128,19 @@ func (h *Handler) Receive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Messaging path (ADR-006 §3.3): DM / story-reply / story-mention /
+	// ad-referral — a SEPARATE surface from comments, never coupled to
+	// catalog_post. Comment path above is unchanged.
+	for _, im := range ExtractMessagingEvents(payload) {
+		if err := h.processMessaging(ctx, im); err != nil {
+			h.log.Error("webhook: process messaging",
+				slog.String("error", err.Error()),
+				slog.String("message_id", im.MessageID),
+				slog.String("subtype", im.Subtype),
+			)
+		}
+	}
+
 	// Step 7: acknowledge immediately.
 	httpx.JSON(w, http.StatusOK, map[string]bool{"received": true})
 }
@@ -235,6 +248,109 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 	h.log.Info("webhook: comment enqueued",
 		slog.String("comment_id", v.ID),
 		slog.String("media_id", v.Media.ID),
+	)
+	return nil
+}
+
+// processMessaging resolves the account, then performs dedupe and the
+// HasLiveWorkflow gate for one messaging event (DM / story-reply /
+// story-mention / ad-referral — ADR-006 §3.3). Mirrors processComment's
+// structure; deliberately does NOT check catalog_post (DM/story is not
+// seller-specific, unlike the comment path — SoC §12a-3).
+//
+// Returns nil on skip (unknown account / duplicate / no live workflow) or
+// successful enqueue. Returns a non-nil error only on DB or queue failures
+// worth logging.
+func (h *Handler) processMessaging(ctx context.Context, im IngestMessaging) error {
+	if im.ContactID == "" || im.MessageID == "" {
+		return nil // skip incomplete events
+	}
+
+	// Echo/self guard: a messaging event whose sender IS the account (sender.id
+	// == entry.id) is the account's own outbound DM echoed/synced back, not an
+	// inbound contact. Ingesting it would open a conversation keyed to our own
+	// IGSID and could self-trigger a [dm-received → send-dm] loop. Instagram has
+	// no follower/broadcast surface here (§4b) — this is purely inbound intake.
+	if im.ContactID == im.EntryID {
+		h.log.Debug("webhook: skip echo/self messaging event",
+			slog.String("entry_id", im.EntryID),
+			slog.String("message_id", im.MessageID),
+		)
+		return nil
+	}
+
+	// Step 1 (ADR-006 §3.3): resolve the connected account from entry.id
+	// (IGSID, §4.0). Unknown accounts are skipped safely — never a 500, since
+	// Meta would retry forever otherwise.
+	account, err := h.queries.GetAccountByIgUserID(ctx, im.EntryID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			h.log.Debug("webhook: unknown account for messaging entry — skip",
+				slog.String("entry_id", im.EntryID),
+				slog.String("message_id", im.MessageID),
+			)
+			return nil
+		}
+		return fmt.Errorf("webhook: resolve account (messaging): %w", err)
+	}
+	accountID := account.ID
+
+	// Step 2: dedupe ledger. ON CONFLICT DO NOTHING → 0 rows = already processed.
+	rows, err := h.queries.InsertProcessedMessage(ctx, dbgen.InsertProcessedMessageParams{
+		IgMessageID:     im.MessageID,
+		AccountID:       accountID,
+		Subtype:         im.Subtype,
+		ContactIgUserID: im.ContactID,
+	})
+	if err != nil {
+		return fmt.Errorf("webhook: insert processed message: %w", err)
+	}
+	if rows == 0 {
+		h.log.Debug("webhook: duplicate message — skip",
+			slog.String("message_id", im.MessageID),
+		)
+		return nil
+	}
+
+	// Step 3: enqueue-gate. No catalog check here (ADR-006 §3.3 note) — DM/story
+	// is not coupled to catalog_post; the only pre-screen is "does this account
+	// have any live workflow that could possibly fire on this event".
+	hasLive, err := h.queries.HasLiveWorkflow(ctx, accountID)
+	if err != nil {
+		return fmt.Errorf("webhook: check live workflow (messaging): %w", err)
+	}
+	if !hasLive {
+		h.log.Debug("webhook: no live workflow — skip messaging enqueue",
+			slog.String("message_id", im.MessageID),
+		)
+		return nil
+	}
+
+	// Capture the event time (ADR-006 §4.1): ms-epoch webhook timestamp, or
+	// receipt time if the entry omitted it.
+	eventAt := time.Now().UTC()
+	if im.EventAt > 0 {
+		eventAt = time.UnixMilli(im.EventAt).UTC()
+	}
+
+	// Step 4: enqueue for worker (window upsert, engine run — ADR-006 §4.1).
+	if err := h.enq.EnqueueDMIngest(ctx, tasks.DMIngestPayload{
+		AccountID:    uuidToString(accountID),
+		Source:       im.Source,
+		Subtype:      im.Subtype,
+		MessageID:    im.MessageID,
+		FromID:       im.ContactID,
+		FromUsername: "", // rarely available on the messaging surface (ADR-006 R6)
+		Text:         im.Text,
+		AdRef:        im.AdRef,
+		EventAt:      eventAt.Format(time.RFC3339),
+	}); err != nil {
+		return fmt.Errorf("webhook: enqueue dm ingest: %w", err)
+	}
+
+	h.log.Info("webhook: dm/messaging event enqueued",
+		slog.String("message_id", im.MessageID),
+		slog.String("subtype", im.Subtype),
 	)
 	return nil
 }

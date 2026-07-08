@@ -30,6 +30,14 @@ const (
 	// (Queue) when quota was exhausted (MAJOR-3b/§4c overflow → queue → send when
 	// quota recovers). Enqueued with a delay; the handler re-checks the gate.
 	TaskOutboundSend = "outbound:send"
+
+	// TaskDMIngest is enqueued when a webhook messaging event (DM, story
+	// reply, story mention, or ad-referral — ADR-006 §3.3) passes account
+	// resolution, dedupe, and the HasLiveWorkflow gate. Mirrors
+	// TaskCommentIngest but runs a separate ingest path: no catalog_post
+	// coupling (DM/story is not seller-specific), and it upserts the
+	// conversation window store on every event (ADR-006 §4.1).
+	TaskDMIngest = "dm:ingest"
 )
 
 // CommentIngestPayload is the payload for TaskCommentIngest.
@@ -50,6 +58,33 @@ type CommentIngestPayload struct {
 // ReservationExpirePayload is the payload for TaskReservationExpire.
 type ReservationExpirePayload struct {
 	ReservationID string `json:"reservation_id"`
+}
+
+// DMIngestPayload is the payload for TaskDMIngest (ADR-006 §4.1). AccountID is
+// the only credential-adjacent field — the worker looks up the access token
+// from Postgres itself (ADR-002 §6.2, never carried in the queue payload).
+// Source is always "dm" for every messaging-surface event (DM, story-reply,
+// story-mention, ad-referral — ADR-006 koreksi B0); Subtype is the single
+// discriminator the six neutral trigger nodes match on.
+type DMIngestPayload struct {
+	AccountID string `json:"account_id"`
+	// Source is always workflow.SourceDM ("dm") — kept as a string here (not
+	// the workflow package's constant) so this platform-level package stays
+	// free of a dependency on libs/workflow (§5a boundary).
+	Source string `json:"source"`
+	// Subtype ∈ {"dm","story-reply","story-mention","ad-referral"} (ADR-006 §2).
+	Subtype      string `json:"subtype"`
+	MessageID    string `json:"message_id"`
+	MediaID      string `json:"media_id,omitempty"`
+	FromID       string `json:"from_id"`
+	FromUsername string `json:"from_username,omitempty"`
+	Text         string `json:"text,omitempty"`
+	// AdRef carries the ad-referral payload for the click-to-dm-ad trigger
+	// (ADR-006 §2.1); empty for every other subtype.
+	AdRef string `json:"ad_ref,omitempty"`
+	// EventAt is the webhook messaging timestamp (RFC3339) — the source of
+	// truth for conversation.last_interaction_at (ADR-006 §4.1 step 4).
+	EventAt string `json:"event_at"`
 }
 
 // OutboundSendPayload is the payload for TaskOutboundSend (MAJOR-2). It carries

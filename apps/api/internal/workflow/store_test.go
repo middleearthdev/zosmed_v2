@@ -89,8 +89,14 @@ func TestValidateForActivate_UnknownNodeType(t *testing.T) {
 func TestValidateForActivate_TriggerNotRunnable(t *testing.T) {
 	trigger := newTestUUID(1)
 	action := newTestUUID(2)
+	// ADR-006 flipped all six messaging nodes (incl. "dm-received") to
+	// Runnable:true, so no genuine catalog TRIGGER entry is non-runnable
+	// anymore. validateForActivate switches on the persisted row's Category
+	// field (not the catalog entry's own category), so a catalog-known but
+	// still non-runnable ACTION node type ("ai-reply", ADR-005/006
+	// Non-Scope) tagged as category "trigger" still exercises this branch.
 	nodes := []dbgen.WorkflowNode{
-		node(trigger, "trigger", "dm-received"), // catalog-known, not runnable in iteration 1
+		node(trigger, "trigger", "ai-reply"), // catalog-known, still not runnable
 		node(action, "action", "send-whatsapp-link"),
 	}
 	reason, ok := validateForActivate(nodes, nil)

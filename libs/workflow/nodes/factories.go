@@ -14,4 +14,13 @@ func RegisterFactories(fmap workflow.FactoryMap) {
 	fmap[NodeTypeSendWhatsAppLink] = workflow.Factory{Category: workflow.KindAction, Build: BuildSendWhatsAppLink}
 	fmap[NodeTypeReplyComment] = workflow.Factory{Category: workflow.KindAction, Build: BuildReplyComment}
 	fmap[NodeTypeOutboundWebhook] = workflow.Factory{Category: workflow.KindAction, Build: BuildOutboundWebhook}
+
+	// ADR-006 §2: messaging/story ingest — six neutral nodes flipped from
+	// Runnable:false to true. All Source==dm; Raw[event_subtype] discriminates.
+	fmap[NodeTypeDMReceived] = workflow.Factory{Category: workflow.KindTrigger, Build: BuildDMReceived}
+	fmap[NodeTypeStoryReply] = workflow.Factory{Category: workflow.KindTrigger, Build: BuildStoryReply}
+	fmap[NodeTypeStoryMention] = workflow.Factory{Category: workflow.KindTrigger, Build: BuildStoryMention}
+	fmap[NodeTypeClickToDMAd] = workflow.Factory{Category: workflow.KindTrigger, Build: BuildClickToDMAd}
+	fmap[NodeTypeConversationState] = workflow.Factory{Category: workflow.KindFilter, Build: BuildConversationState}
+	fmap[NodeTypeSendDM] = workflow.Factory{Category: workflow.KindAction, Build: BuildSendDM}
 }

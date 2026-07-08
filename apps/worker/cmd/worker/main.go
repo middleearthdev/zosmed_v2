@@ -85,6 +85,7 @@ func main() {
 
 	// ── Register task handlers ────────────────────────────────────────────────
 	ingestHandler := tasks.NewCommentIngestHandler(r, log)
+	dmIngestHandler := tasks.NewDMIngestHandler(r, log)
 	expireHandler := tasks.NewReservationExpireHandler(r, log)
 	tokenRefreshHandler := tasks.NewTokenRefreshHandler(r.DB, oauthCfg, log)
 	reconcileHandler := tasks.NewReservationReconcileHandler(r.DB, r.Svc, log)
@@ -96,6 +97,7 @@ func main() {
 
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(ptasks.TaskCommentIngest, ingestHandler.ProcessTask)
+	mux.HandleFunc(ptasks.TaskDMIngest, dmIngestHandler.ProcessTask)
 	mux.HandleFunc(ptasks.TaskReservationExpire, expireHandler.ProcessTask)
 	mux.HandleFunc(ptasks.TaskTokenRefreshSweep, tokenRefreshHandler.ProcessTask)
 	mux.HandleFunc(ptasks.TaskReservationReconcile, reconcileHandler.ProcessTask)

@@ -26,10 +26,20 @@ func (g *recordingGater) Allow(_ context.Context, req workflow.OutboundReq) (wor
 	return g.decision, nil
 }
 
-// recordingSender records whether SendPrivateReply was ever invoked.
+// recordingSender records whether SendPrivateReply/SendDM was ever invoked.
+// Shared across action_wa_link_test.go, action_reply_comment_test.go, and
+// action_send_dm_test.go (§12a-1 DRY — one test double, not three).
 type recordingSender struct {
 	sendCalled bool
 	sentText   string
+
+	// dm* fields track calls to SendDM specifically (action_send_dm_test.go);
+	// kept separate from sendCalled/sentText (SendPrivateReply) so a test can
+	// assert exactly which method fired.
+	dmSendCalled bool
+	dmTargetUser string
+	dmIgUserID   string
+	dmSentText   string
 }
 
 func (s *recordingSender) ReplyToComment(_ context.Context, _, _ string) error { return nil }
@@ -38,7 +48,13 @@ func (s *recordingSender) SendPrivateReply(_ context.Context, _, commentID, text
 	s.sentText = text
 	return nil
 }
-func (s *recordingSender) SendDM(_ context.Context, _, _, _ string) error { return nil }
+func (s *recordingSender) SendDM(_ context.Context, igUserID, targetUserID, text string) error {
+	s.dmSendCalled = true
+	s.dmIgUserID = igUserID
+	s.dmTargetUser = targetUserID
+	s.dmSentText = text
+	return nil
+}
 
 func buildWaLinkAction(t *testing.T, cfg string) workflow.Action {
 	t.Helper()

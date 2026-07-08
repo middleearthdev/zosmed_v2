@@ -180,6 +180,16 @@ type CommentOrderSetting struct {
 	ReplyTemplate string      `json:"reply_template"`
 }
 
+type Conversation struct {
+	ID                pgtype.UUID        `json:"id"`
+	AccountID         pgtype.UUID        `json:"account_id"`
+	ContactIgUserID   string             `json:"contact_ig_user_id"`
+	LastInteractionAt pgtype.Timestamptz `json:"last_interaction_at"`
+	LastSource        string             `json:"last_source"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type OutboundLog struct {
 	ID           pgtype.UUID        `json:"id"`
 	AccountID    pgtype.UUID        `json:"account_id"`
@@ -197,6 +207,14 @@ type ProcessedComment struct {
 	CommentText     string             `json:"comment_text"`
 	ContactIgUserID string             `json:"contact_ig_user_id"`
 	ContactHandle   string             `json:"contact_handle"`
+	ReceivedAt      pgtype.Timestamptz `json:"received_at"`
+}
+
+type ProcessedMessage struct {
+	IgMessageID     string             `json:"ig_message_id"`
+	AccountID       pgtype.UUID        `json:"account_id"`
+	Subtype         string             `json:"subtype"`
+	ContactIgUserID string             `json:"contact_ig_user_id"`
 	ReceivedAt      pgtype.Timestamptz `json:"received_at"`
 }
 
