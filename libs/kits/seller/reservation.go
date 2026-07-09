@@ -25,6 +25,16 @@ var (
 
 	// ErrProductNotFound is returned by Reserve when no product matches the code.
 	ErrProductNotFound = errors.New("seller: produk tidak ditemukan untuk kode ini")
+
+	// errReservationConflict is an internal sentinel (ADR-007 §2.3b, #6b):
+	// CreateReservation hit its UNIQUE(account_id, ig_comment_id) constraint
+	// via ON CONFLICT DO NOTHING (db/query/reservations.sql), meaning this
+	// comment was already reserved by an earlier attempt (e.g. asynq re-running
+	// comment:ingest). Returned from inside the tx closure so the whole
+	// transaction — including the DecrementStock just above it — rolls back;
+	// Reserve then fetches the existing reservation OUTSIDE the (rolled-back)
+	// tx instead of creating a second one or decrementing stock twice.
+	errReservationConflict = errors.New("seller: reservation already exists for this comment")
 )
 
 // ReservationDB is the minimal database interface required by ReservationService.
@@ -37,6 +47,11 @@ type ReservationDB interface {
 	DecrementStock(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
 	IncrementStock(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
 	CreateReservation(ctx context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error)
+	// GetReservationByComment fetches the existing reservation for (account_id,
+	// ig_comment_id) when CreateReservation hits its ON CONFLICT DO NOTHING
+	// branch (ADR-007 #6b). Called OUTSIDE the tx (s.db, not the tx-bound q) —
+	// by the time it's needed the conflicting tx has already rolled back.
+	GetReservationByComment(ctx context.Context, arg dbgen.GetReservationByCommentParams) (dbgen.Reservation, error)
 	UpdateReservationStatus(ctx context.Context, arg dbgen.UpdateReservationStatusParams) (dbgen.Reservation, error)
 }
 
@@ -124,8 +139,18 @@ type ReserveResult struct {
 //  1. GetProductByPostAndCode — locate the product; ErrProductNotFound if missing.
 //  2. DecrementStock atomically (WHERE stock_left > 0); ErrOutOfStock if zero rows.
 //  3. Build the wa.me link (stored in the reservation for private-reply action).
-//  4. CreateReservation with status=reserved and expires_at=now+holdSeconds.
+//  4. CreateReservation with status=reserved and expires_at=now+holdSeconds —
+//     ON CONFLICT (account_id, ig_comment_id) DO NOTHING (db/query/reservations.sql).
 //  5. Enqueue TaskReservationExpire with the hold delay (idempotent via TaskID).
+//
+// Idempotency (ADR-007 §2.3b, #6b): a re-run of the SAME comment (e.g. asynq
+// re-processing comment:ingest after a crash) must not reserve/decrement
+// twice. Steps 2+4 share one transaction; if CreateReservation hits the
+// UNIQUE(account_id, ig_comment_id) conflict, the whole transaction —
+// including the DecrementStock — rolls back, and Reserve fetches (outside the
+// now-rolled-back tx) the reservation the FIRST attempt already created via
+// GetReservationByComment, returning it as a successful (non-error) result.
+// No second decrement, no second expire timer.
 //
 // holdSeconds <= 0 uses DefaultHoldSeconds.
 // waPhone, fromUsername, code, and productName populate the wa.me prefill.
@@ -188,6 +213,13 @@ func (s *ReservationService) Reserve(
 			WaLink:          waLink,
 		})
 		if e != nil {
+			if isNoRows(e) {
+				// ON CONFLICT (account_id, ig_comment_id) DO NOTHING (ADR-007
+				// #6b): this comment was already reserved. Return the sentinel
+				// so the tx rolls back — the DecrementStock above must NOT
+				// stick; the existing reservation already owns its stock unit.
+				return errReservationConflict
+			}
 			return fmt.Errorf("seller: create reservation: %w", e)
 		}
 		res = r
@@ -195,6 +227,20 @@ func (s *ReservationService) Reserve(
 	})
 	if errors.Is(txErr, ErrOutOfStock) {
 		return ReserveResult{}, ErrOutOfStock
+	}
+	if errors.Is(txErr, errReservationConflict) {
+		// Idempotent re-run (ADR-007 #6b): the tx above rolled back (no double
+		// decrement); fetch the reservation the earlier attempt already
+		// created and committed. No second expire timer either — the first
+		// Reserve call already owns both.
+		existing, err := s.db.GetReservationByComment(ctx, dbgen.GetReservationByCommentParams{
+			AccountID:   accountID,
+			IgCommentID: commentID,
+		})
+		if err != nil {
+			return ReserveResult{}, fmt.Errorf("seller: reservation conflict but lookup failed: %w", err)
+		}
+		return ReserveResult{Reservation: existing, ProductName: product.Name}, nil
 	}
 	if txErr != nil {
 		return ReserveResult{}, txErr

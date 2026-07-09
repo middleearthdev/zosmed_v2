@@ -11,7 +11,7 @@ Panduan menjalankan stack dev: **API** (`apps/api`), **Worker** (`apps/worker`),
 | Kebutuhan | Cara siapkan | Wajib untuk |
 |---|---|---|
 | **PostgreSQL** (+ 1 database) | `brew services start postgresql` lalu `createdb zosmed` — atau Docker | Semua (API ping DB saat start) |
-| **Redis** | `brew services start redis` — atau `docker run -p 6379:6379 redis` | Worker; API (koneksi lazy) |
+| **Redis** | `brew services start redis` — atau `docker run -p 6379:6379 redis` | Worker; API **webhook ingest** (enqueue asynq, ADR-007) — login/onboarding tidak butuh |
 | **Go** (workspace `go.work`) | sudah ada di repo | API, Worker, Seed |
 | **goose** (migrasi DB) | `go install github.com/pressly/goose/v3/cmd/goose@latest` | Migrasi |
 | **bun** (deps + dev server FE) | `curl -fsSL https://bun.sh/install \| bash` | Web |
@@ -92,14 +92,34 @@ SKIP_WORKER=1 bash scripts/dev.sh   # tanpa worker (cukup untuk login/onboarding
 ```
 
 ### Worker (opsional)
-Hanya untuk comment-to-order (deteksi keep/C, reservasi, retry). **Tidak** dipakai login/onboarding.
+Mengeksekusi semua task asynq — **tidak** dipakai login/onboarding, tapi wajib untuk alur webhook/workflow:
+- `comment:ingest` — komentar masuk → jalankan workflow live (+ comment-to-order keep/C).
+- `dm:ingest` — DM / story reply / story mention / ad-referral (ADR-006) → update window 24h → jalankan workflow live.
+- `outbound:send` — retry generik outbound yang ditunda gate saat kuota penuh (ADR-007; re-cek gate tiap dequeue, drop bila deadline §4c lewat).
+- `reservation:expire` / `reservation:reconcile` — auto-release stok keep/C.
+
 ```bash
 go run ./apps/worker/cmd/worker
 ```
 
 ---
 
-## 5. URL & Port
+## 5. Postman collection
+
+Koleksi lengkap ada di [`deploy/zosmed.postman_collection.json`](../deploy/zosmed.postman_collection.json) — import ke Postman, lalu isi variabel di tab **Variables** (`baseUrl`, `igAppSecret`, dst.).
+
+- **Auth & Onboarding** — register/login/segment/complete. Login menyimpan cookie `zsid` otomatis; folder lain yang butuh sesi tinggal jalan.
+- **Webhooks (Meta)** — simulasi payload Meta: comments, **DM, story reply, story mention, ad-referral** (ADR-006). Signature HMAC dihitung otomatis oleh pre-request script dari `igAppSecret` — samakan dengan `IG_APP_SECRET` di `.env`. Butuh **Redis nyala** (enqueue-first ADR-007) dan **worker jalan** agar event benar-benar diproses.
+- **Workflows (Builder)** — CRUD workflow + activate/pause + runs (ADR-004/005). Butuh sesi login + akun IG terhubung (sudah disediakan seed).
+- **Comment-to-Order / Reservations** — layar keep/C dan aksi reservasi.
+
+Contoh payload webhook sudah memakai nilai seed (`entry.id = SEED-IG-0001`, `media.id = SEED-MEDIA-0001`, keep code `C1`/`C2`) — langsung jalan setelah seed §3.
+
+Alur uji end-to-end tercepat: `Login` → `Create Workflow` → `Save Workflow (graph)` → `Activate` → kirim `Webhook Receive (comments)` → cek `List Runs (per akun)`.
+
+---
+
+## 6. URL & Port
 
 | Service | URL |
 |---|---|
@@ -110,7 +130,7 @@ Web mem-proxy `/api/*` dan `/connect/*` ke API (`next.config.ts` rewrites) supay
 
 ---
 
-## 6. Reset database (mulai bersih)
+## 7. Reset database (mulai bersih)
 
 ```bash
 goose -dir db/migrations postgres "$DB_URL" reset   # drop semua
@@ -121,7 +141,7 @@ Atau cukup hapus baris: `TRUNCATE app_user, user_session CASCADE;` lalu seed lag
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Gejala | Penyebab / solusi |
 |---|---|
@@ -130,3 +150,5 @@ Atau cukup hapus baris: `TRUNCATE app_user, user_session CASCADE;` lalu seed lag
 | Login sukses tapi `/auth/me` 401 di browser | `APP_ENV=prod` di lokal → cookie `Secure` tak terkirim via http. Set `APP_ENV=dev`. |
 | Web tak bisa hit API | Pastikan API di `:8080` dan `NEXT_PUBLIC_API_URL` (default `http://localhost:8080`) benar. |
 | Seed menolak jalan | `APP_ENV=prod` — seed sengaja menolak DB produksi. Set `dev`. |
+| Webhook balas 200 tapi event tak diproses | Redis mati → enqueue gagal, ledger tak ditulis (ADR-007: event **tidak hilang** — kirim ulang payload yang sama setelah Redis nyala, akan diproses). Atau worker belum jalan → task menumpuk di queue. |
+| Webhook di-skip padahal payload baru | `comment_id`/`mid` sama dengan yang pernah diproses → dedupe. Ganti id/mid di payload untuk event "baru". |

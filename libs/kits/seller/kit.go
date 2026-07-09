@@ -7,6 +7,7 @@ import (
 
 	"github.com/zosmed/zosmed/libs/platform/uuidx"
 	"github.com/zosmed/zosmed/libs/workflow"
+	"github.com/zosmed/zosmed/libs/workflow/nodes"
 )
 
 // Node key constants. Stable identifiers used in WorkflowDef and runner wiring.
@@ -44,17 +45,19 @@ const (
 // Must be called before workflow.NewEngine. Engine does NOT import this package —
 // nodes are injected via the Registry (dependency inversion, §6/§8).
 //
-// enqueueOutbound schedules a private-reply retry when the safety gate returns
-// Queue (MAJOR-2); pass nil to disable retry (Queue is reported deferred only).
+// enqueueDeferred schedules a private-reply retry when the safety gate
+// returns Queue (ADR-007 §2.1 point 4 — the same nodes.EnqueueDeferredFunc
+// contract every neutral action node uses); pass nil to disable retry (Queue
+// is reported deferred only).
 //
 // Instance construction is shared with RegisterFactories (ADR-004 §6.1 B5,
 // §12a-1 DRY) via the newCommentTrigger/newReserveAction/newPrivateReplyAction
 // constructors below — this func wires them under the fixed legacy keys used
 // by the transitional fallback workflow (runner.CommentToOrderWorkflow, R3).
-func RegisterNodes(reg *workflow.Registry, svc *ReservationService, waPhone string, enqueueOutbound EnqueueOutboundFunc) {
+func RegisterNodes(reg *workflow.Registry, svc *ReservationService, waPhone string, enqueueDeferred nodes.EnqueueDeferredFunc) {
 	reg.RegisterTrigger(NodeKeyCommentTrigger, newCommentTrigger())
 	reg.RegisterAction(NodeKeyReserve, newReserveAction(svc, waPhone))
-	reg.RegisterAction(NodeKeyPrivateReply, newPrivateReplyAction(svc, enqueueOutbound))
+	reg.RegisterAction(NodeKeyPrivateReply, newPrivateReplyAction(svc, enqueueDeferred))
 }
 
 // ── shared instance constructors (§12a-1 DRY: used by both RegisterNodes,
@@ -67,8 +70,8 @@ func newReserveAction(svc *ReservationService, waPhone string) *reserveAction {
 	return &reserveAction{svc: svc, waPhone: waPhone}
 }
 
-func newPrivateReplyAction(svc *ReservationService, enqueueOutbound EnqueueOutboundFunc) *privateReplyAction {
-	return &privateReplyAction{svc: svc, enqueueOutbound: enqueueOutbound}
+func newPrivateReplyAction(svc *ReservationService, enqueueDeferred nodes.EnqueueDeferredFunc) *privateReplyAction {
+	return &privateReplyAction{svc: svc, enqueueDeferred: enqueueDeferred}
 }
 
 // ── commentTrigger ────────────────────────────────────────────────────────────
@@ -156,7 +159,7 @@ func (a *reserveAction) Execute(ctx context.Context, rc *workflow.RunContext) (w
 //   - Reject → reservation stays reserved until the expire task fires
 type privateReplyAction struct {
 	svc             *ReservationService
-	enqueueOutbound EnqueueOutboundFunc
+	enqueueDeferred nodes.EnqueueDeferredFunc
 }
 
 func (a *privateReplyAction) Execute(ctx context.Context, rc *workflow.RunContext) (workflow.ActionResult, error) {
@@ -169,6 +172,7 @@ func (a *privateReplyAction) Execute(ctx context.Context, rc *workflow.RunContex
 
 	// Build a single reply text that includes the wa.me link (one outbound, guardrail A).
 	replyText := BuildPrivateReplyText("", nama, kode, produk, waLink)
+	commentAt := rawTime(rc.Event.Raw, RawKeyCommentAt)
 
 	req := workflow.OutboundReq{
 		AccountID:    rc.Event.AccountID,
@@ -176,7 +180,7 @@ func (a *privateReplyAction) Execute(ctx context.Context, rc *workflow.RunContex
 		TargetUserID: rc.Event.FromID,
 		TriggerKey:   rc.Event.ObjectID, // comment ID — dedupe key per (account, user, comment)
 		CommentID:    rc.Event.ObjectID,
-		CommentAt:    rawTime(rc.Event.Raw, RawKeyCommentAt),
+		CommentAt:    commentAt,
 		PostID:       rc.Event.MediaID,
 	}
 
@@ -203,26 +207,30 @@ func (a *privateReplyAction) Execute(ctx context.Context, rc *workflow.RunContex
 
 	case workflow.DecisionQueue:
 		// Overflow (§4c): reservation stays reserved and the private reply is
-		// re-queued to send when quota recovers (MAJOR-2). Without an enqueue
-		// func wired, fall back to reporting deferred only.
-		if a.enqueueOutbound == nil {
+		// re-queued to send when quota recovers, via the same generic
+		// outbound:send retry every neutral action node uses (ADR-007 §2.1
+		// point 4). Without an enqueue func wired, fall back to reporting
+		// deferred only.
+		if a.enqueueDeferred == nil {
 			return workflow.ActionResult{
 				Detail: fmt.Sprintf("gate=queue (%s); outbound deferred (no retry wired)", d.Reason),
 			}, nil
 		}
-		retry := OutboundRetry{
+		def := nodes.DeferredOutbound{
 			AccountID:     rc.Event.AccountID,
+			Kind:          "private-reply",
 			IgUserID:      igUserID,
-			CommentID:     rc.Event.ObjectID,
 			TargetUserID:  rc.Event.FromID,
-			ReservationID: reservationID,
-			ReplyText:     replyText,
+			ObjectID:      rc.Event.ObjectID,
+			Text:          replyText,
+			CommentAt:     commentAt,
 			PostID:        rc.Event.MediaID,
 			TriggerKey:    rc.Event.ObjectID,
-			CommentAt:     rawTime(rc.Event.Raw, RawKeyCommentAt),
+			Deadline:      nodes.DeadlineFrom(commentAt, nodes.PrivateReplyWindow), // §4c: 7 days from the comment
+			ReservationID: reservationID,
 		}
-		if err := a.enqueueOutbound(ctx, retry, OutboundRetryDelay); err != nil {
-			return workflow.ActionResult{}, fmt.Errorf("seller.private-reply: enqueue outbound retry: %w", err)
+		if err := a.enqueueDeferred(ctx, def, nodes.DeferredRetryDelay); err != nil {
+			return workflow.ActionResult{}, fmt.Errorf("seller.private-reply: enqueue deferred: %w", err)
 		}
 		return workflow.ActionResult{
 			Detail: fmt.Sprintf("gate=queue (%s); outbound retry enqueued", d.Reason),

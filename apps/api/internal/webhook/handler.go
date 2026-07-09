@@ -24,13 +24,16 @@ import (
 //
 // Responsibilities (ADR-001 §3.2; account resolution per ADR-002 §6.1):
 //   - GET /webhooks/meta  → verify webhook challenge handshake
-//   - POST /webhooks/meta → verify signature → resolve account (IGSID) → dedupe → filter → enqueue
+//   - POST /webhooks/meta → verify signature → resolve account (IGSID) →
+//     dedupe read-check → filter → enqueue-first → dedupe ledger write
+//     (ADR-007 §2.2/§3.9 — enqueue-first ordering; see processComment/
+//     processMessaging docs below)
 //
 // This handler DOES NOT call the Instagram API, write reservations, or
 // perform any heavy processing. All of that happens in apps/worker (SoC §12a-3).
 type Handler struct {
 	queries     *dbgen.Queries
-	enq         *enqueue.Client
+	enq         enqueue.Enqueuer
 	appSecret   string
 	verifyToken string
 	log         *slog.Logger
@@ -41,7 +44,7 @@ type Handler struct {
 // carries its own IGSID (entry.id), looked up per request via GetAccountByIgUserID.
 func New(
 	queries *dbgen.Queries,
-	enq *enqueue.Client,
+	enq enqueue.Enqueuer,
 	appSecret, verifyToken string,
 	log *slog.Logger,
 ) *Handler {
@@ -79,14 +82,16 @@ func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request) {
 
 // Receive handles POST /webhooks/meta for incoming webhook events from Meta.
 //
-// Processing pipeline (ADR-001 §3.2):
+// Processing pipeline (ADR-001 §3.2; reordered by ADR-007 §2.2/§3.9):
 //  1. Read raw body BEFORE unmarshal (HMAC needs raw bytes).
 //  2. Verify X-Hub-Signature-256 — 403 on failure, no processing.
 //  3. Unmarshal payload; extract comment events.
-//  4. Per comment: dedupe via processed_comment (ON CONFLICT DO NOTHING; 0 rows → skip).
+//  4. Per comment: ExistsProcessedComment read-check (already processed → skip).
 //  5. Filter (ADR-005 §3 B1): skip enqueue unless media_id is in an active
 //     catalog post OR the account has ≥1 `live` workflow.
-//  6. EnqueueCommentIngest for the worker.
+//  6. EnqueueCommentIngest (enqueue-first, ADR-007 §2.2) — only on success is
+//     the processed_comment ledger written; a failed enqueue leaves nothing
+//     recorded so the event is retried on next delivery.
 //  7. Respond 200 ASAP — processing is asynchronous.
 func (h *Handler) Receive(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -145,18 +150,37 @@ func (h *Handler) Receive(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]bool{"received": true})
 }
 
-// processComment resolves the account, then performs dedupe, catalog filter,
-// and enqueue for one comment event.
+// processComment resolves the account, then performs the dedupe read-check,
+// catalog filter, enqueue, and — only once enqueue has durably succeeded —
+// the processed_comment ledger write (ADR-007 §2.2/§3.9 enqueue-first
+// ordering; supersedes the old insert-ledger-then-enqueue order from
+// ADR-001, which could record an event as "processed" while it was never
+// handed off to the queue).
+//
+// Order:
+//  1. resolve account (skip unknown)
+//  2. ExistsProcessedComment read-check (already processed → skip)
+//  3. catalog/live-workflow filter (ADR-005 §3 B1)
+//  4. EnqueueCommentIngest — TaskID+Retention makes this idempotent; a
+//     genuine enqueue failure returns an error WITHOUT writing the ledger,
+//     so the next delivery of the same event (Meta retry, or this handler
+//     called again) re-attempts from a clean slate.
+//  5. InsertProcessedComment (ON CONFLICT DO NOTHING) — durable confirmation
+//     + long-lived dedupe. A failure here after a successful enqueue is
+//     logged but NOT propagated as an error: the task is already
+//     durably enqueued (TaskID closes the double-enqueue risk on retry),
+//     so failing the request would only cause pointless re-processing.
+//
 // Returns nil on skip (unknown account / duplicate / not in catalog) or
 // successful enqueue. Returns a non-nil error only on DB or queue failures
-// worth logging.
+// worth logging (Receive logs them at Error level but still replies 200).
 func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 	v := ic.Value
 	if v.ID == "" || v.Media.ID == "" {
 		return nil // skip incomplete events
 	}
 
-	// Step 4 (ADR-002 §6.1): resolve the connected account from entry.id
+	// Step 1 (ADR-002 §6.1): resolve the connected account from entry.id
 	// (IGSID). Comments belonging to an account Zosmed doesn't know about are
 	// skipped safely — never a 500, since Meta would retry forever otherwise.
 	account, err := h.queries.GetAccountByIgUserID(ctx, ic.EntryID)
@@ -175,26 +199,22 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 	}
 	accountID := account.ID
 
-	// Step 5: dedupe ledger. ON CONFLICT DO NOTHING → 0 rows = already processed.
-	rows, err := h.queries.InsertProcessedComment(ctx, dbgen.InsertProcessedCommentParams{
-		IgCommentID:     v.ID,
-		AccountID:       accountID,
-		IgMediaID:       v.Media.ID,
-		CommentText:     v.Text,
-		ContactIgUserID: v.From.ID,
-		ContactHandle:   v.From.Username,
-	})
+	// Step 2 (ADR-007 §2.2 step 2): dedupe read-check. This is a plain read —
+	// it does NOT claim the event, so it never blocks a later enqueue from
+	// happening. It catches re-deliveries that arrive after the asynq TaskID
+	// Retention window (§3.5) has expired.
+	alreadyProcessed, err := h.queries.ExistsProcessedComment(ctx, v.ID)
 	if err != nil {
-		return fmt.Errorf("webhook: insert processed comment: %w", err)
+		return fmt.Errorf("webhook: check processed comment: %w", err)
 	}
-	if rows == 0 {
+	if alreadyProcessed {
 		h.log.Debug("webhook: duplicate comment — skip",
 			slog.String("comment_id", v.ID),
 		)
 		return nil
 	}
 
-	// Step 6 (ADR-005 §3 B1 — ingest decoupling): enqueue when EITHER the media
+	// Step 3 (ADR-005 §3 B1 — ingest decoupling): enqueue when EITHER the media
 	// is a registered/active catalog post (legacy seller pre-screen, ADR-001)
 	// OR the account has at least one generic `live` workflow (comment-received
 	// → ... → action, ADR-005 §2). This is what makes a workflow like
@@ -230,9 +250,14 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 		commentAt = time.Unix(ic.EntryTime, 0).UTC()
 	}
 
-	// Step 7: enqueue for worker (heavy lifting: keep-code detect, reserve, reply).
-	// Only the account UUID goes into the payload — the access token stays in
-	// Postgres; the worker looks it up itself (ADR-002 §6.2, never in Redis).
+	// Step 4 (ADR-007 §2.2 step 4 — enqueue-first): hand off to the worker
+	// (heavy lifting: keep-code detect, reserve, reply) BEFORE recording
+	// "processed". Only the account UUID goes into the payload — the access
+	// token stays in Postgres; the worker looks it up itself (ADR-002 §6.2,
+	// never in Redis). EnqueueCommentIngest treats a TaskID conflict
+	// (already durably enqueued) as success; any other error means the
+	// hand-off genuinely failed, so we return WITHOUT writing the ledger —
+	// the event must be retried, not recorded as processed.
 	if err := h.enq.EnqueueCommentIngest(ctx, tasks.CommentIngestPayload{
 		AccountID:    uuidToString(accountID),
 		CommentID:    v.ID,
@@ -242,7 +267,32 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 		Text:         v.Text,
 		CommentAt:    commentAt.Format(time.RFC3339),
 	}); err != nil {
+		h.log.Error("webhook: enqueue comment ingest failed — ledger NOT written, event will be retried",
+			slog.String("error", err.Error()),
+			slog.String("comment_id", v.ID),
+		)
 		return fmt.Errorf("webhook: enqueue comment ingest: %w", err)
+	}
+
+	// Step 5 (ADR-007 §2.2 step 5): confirmation ledger write. ON CONFLICT DO
+	// NOTHING is still correct here — under a race between two deliveries of
+	// the same event, both may reach this point (TaskID already prevented a
+	// duplicate task), and only one ledger row should exist.
+	if _, err := h.queries.InsertProcessedComment(ctx, dbgen.InsertProcessedCommentParams{
+		IgCommentID:     v.ID,
+		AccountID:       accountID,
+		IgMediaID:       v.Media.ID,
+		CommentText:     v.Text,
+		ContactIgUserID: v.From.ID,
+		ContactHandle:   v.From.Username,
+	}); err != nil {
+		// The task is already durably enqueued (TaskID makes a concurrent
+		// re-enqueue a no-op) — a ledger write failure here must NOT be
+		// escalated into a retry, or the event would be processed twice.
+		h.log.Warn("webhook: insert processed comment ledger failed (task already enqueued — not retrying)",
+			slog.String("error", err.Error()),
+			slog.String("comment_id", v.ID),
+		)
 	}
 
 	h.log.Info("webhook: comment enqueued",
@@ -252,11 +302,17 @@ func (h *Handler) processComment(ctx context.Context, ic IngestComment) error {
 	return nil
 }
 
-// processMessaging resolves the account, then performs dedupe and the
-// HasLiveWorkflow gate for one messaging event (DM / story-reply /
-// story-mention / ad-referral — ADR-006 §3.3). Mirrors processComment's
-// structure; deliberately does NOT check catalog_post (DM/story is not
+// processMessaging resolves the account, then performs the dedupe
+// read-check and the HasLiveWorkflow gate, then enqueues, and — only once
+// enqueue has durably succeeded — writes the processed_message ledger for
+// one messaging event (DM / story-reply / story-mention / ad-referral —
+// ADR-006 §3.3). Mirrors processComment's enqueue-first ordering (ADR-007
+// §2.2/§3.9); deliberately does NOT check catalog_post (DM/story is not
 // seller-specific, unlike the comment path — SoC §12a-3).
+//
+// Order: resolve account → ExistsProcessedMessage read-check → HasLiveWorkflow
+// filter → EnqueueDMIngest (enqueue-first; failure returns error WITHOUT
+// writing the ledger) → InsertProcessedMessage (best-effort confirmation).
 //
 // Returns nil on skip (unknown account / duplicate / no live workflow) or
 // successful enqueue. Returns a non-nil error only on DB or queue failures
@@ -295,17 +351,15 @@ func (h *Handler) processMessaging(ctx context.Context, im IngestMessaging) erro
 	}
 	accountID := account.ID
 
-	// Step 2: dedupe ledger. ON CONFLICT DO NOTHING → 0 rows = already processed.
-	rows, err := h.queries.InsertProcessedMessage(ctx, dbgen.InsertProcessedMessageParams{
-		IgMessageID:     im.MessageID,
-		AccountID:       accountID,
-		Subtype:         im.Subtype,
-		ContactIgUserID: im.ContactID,
-	})
+	// Step 2 (ADR-007 §2.2 step 2): dedupe read-check — same rationale as
+	// processComment. Does not claim the event, only reports whether it was
+	// already fully processed (ledger written after a prior successful
+	// enqueue).
+	alreadyProcessed, err := h.queries.ExistsProcessedMessage(ctx, im.MessageID)
 	if err != nil {
-		return fmt.Errorf("webhook: insert processed message: %w", err)
+		return fmt.Errorf("webhook: check processed message: %w", err)
 	}
-	if rows == 0 {
+	if alreadyProcessed {
 		h.log.Debug("webhook: duplicate message — skip",
 			slog.String("message_id", im.MessageID),
 		)
@@ -333,7 +387,11 @@ func (h *Handler) processMessaging(ctx context.Context, im IngestMessaging) erro
 		eventAt = time.UnixMilli(im.EventAt).UTC()
 	}
 
-	// Step 4: enqueue for worker (window upsert, engine run — ADR-006 §4.1).
+	// Step 4 (ADR-007 §2.2 step 4 — enqueue-first): hand off to the worker
+	// (window upsert, engine run — ADR-006 §4.1) BEFORE recording "processed".
+	// EnqueueDMIngest treats a TaskID conflict as success; any other error
+	// means the hand-off genuinely failed, so we return WITHOUT writing the
+	// ledger — the event must be retried, not recorded as processed.
 	if err := h.enq.EnqueueDMIngest(ctx, tasks.DMIngestPayload{
 		AccountID:    uuidToString(accountID),
 		Source:       im.Source,
@@ -345,7 +403,25 @@ func (h *Handler) processMessaging(ctx context.Context, im IngestMessaging) erro
 		AdRef:        im.AdRef,
 		EventAt:      eventAt.Format(time.RFC3339),
 	}); err != nil {
+		h.log.Error("webhook: enqueue dm ingest failed — ledger NOT written, event will be retried",
+			slog.String("error", err.Error()),
+			slog.String("message_id", im.MessageID),
+		)
 		return fmt.Errorf("webhook: enqueue dm ingest: %w", err)
+	}
+
+	// Step 5 (ADR-007 §2.2 step 5): confirmation ledger write. Best-effort —
+	// see processComment for the rationale on not escalating this failure.
+	if _, err := h.queries.InsertProcessedMessage(ctx, dbgen.InsertProcessedMessageParams{
+		IgMessageID:     im.MessageID,
+		AccountID:       accountID,
+		Subtype:         im.Subtype,
+		ContactIgUserID: im.ContactID,
+	}); err != nil {
+		h.log.Warn("webhook: insert processed message ledger failed (task already enqueued — not retrying)",
+			slog.String("error", err.Error()),
+			slog.String("message_id", im.MessageID),
+		)
 	}
 
 	h.log.Info("webhook: dm/messaging event enqueued",

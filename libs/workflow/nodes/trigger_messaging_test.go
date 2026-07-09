@@ -13,7 +13,7 @@ import (
 func buildTrigger(t *testing.T, nodeType, cfg string) workflow.Trigger {
 	t.Helper()
 	fmap := workflow.FactoryMap{}
-	nodes.RegisterFactories(fmap)
+	nodes.RegisterFactories(fmap, nil)
 	factory, ok := fmap[nodeType]
 	if !ok {
 		t.Fatalf("node_type %q not registered", nodeType)

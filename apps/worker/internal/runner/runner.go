@@ -9,6 +9,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,10 +26,17 @@ import (
 	"github.com/zosmed/zosmed/libs/workflow/nodes"
 )
 
-// outboundMaxRetry caps how many times a deferred private reply (MAJOR-2) is
-// retried by asynq before it is archived. Beyond this the reservation is left
-// to expire (reservation:expire / reservation:reconcile releases the stock).
-const outboundMaxRetry = 5
+// outboundMaxRetry caps how many times a deferred outbound (ADR-007 §2.1) is
+// retried by asynq before it is archived. The Deadline TTL (§4c) is the REAL
+// stop: the handler drops a stale task at dequeue. MaxRetry only needs to be
+// large enough that asynq's default exponential backoff (~n^4 seconds per
+// attempt) spans the longest Deadline — cumulative wait at n=20 is ≈8 days,
+// past the 7-day private-reply window — so an hourly quota bucket that stays
+// saturated for most of an hour (the routine overflow case, §10) still gets
+// retried after the bucket resets instead of archiving mid-wait. Beyond this
+// a seller reservation is left to expire (reservation:expire /
+// reservation:reconcile releases the stock).
+const outboundMaxRetry = 20
 
 // CommentToOrderWorkflow is the WorkflowDef for the seller kit comment-to-order
 // flow: comment trigger → reserve stock → private reply with wa.me link.
@@ -104,30 +112,44 @@ func New(
 	// (MAJOR-3a) — NewPgxTxRunner rolls back if creation fails so stock never leaks.
 	svc := seller.NewReservationServiceTx(db, seller.NewPgxTxRunner(pool), enqueueExpire)
 
-	// enqueueOutbound schedules a private-reply retry when the safety gate defers
-	// the send (Queue overflow, MAJOR-2). TaskID keeps enqueue idempotent per comment.
-	enqueueOutbound := seller.EnqueueOutboundFunc(
-		func(ctx context.Context, r seller.OutboundRetry, delay time.Duration) error {
+	// enqueueDeferred schedules a generic outbound:send retry when the safety
+	// gate defers a send (DecisionQueue overflow, ADR-007 §2.1/§3.8). Shared by
+	// every neutral action node (nodes.RegisterFactories) AND the seller kit
+	// (seller.RegisterFactories) — one closure, one task, no per-Kit duplicate
+	// (§12a-1). TaskID = "outbound:{account}:{kind}:{trigger}" keeps enqueue
+	// idempotent per (account, kind, trigger) — re-enqueuing the identical
+	// retry (e.g. a second DecisionQueue for the same event) collapses onto
+	// the same asynq task instead of stacking duplicates.
+	enqueueDeferred := nodes.EnqueueDeferredFunc(
+		func(ctx context.Context, d nodes.DeferredOutbound, delay time.Duration) error {
 			payload, err := json.Marshal(ptasks.OutboundSendPayload{
-				AccountID:     r.AccountID,
-				IgUserID:      r.IgUserID,
-				CommentID:     r.CommentID,
-				TargetUserID:  r.TargetUserID,
-				ReservationID: r.ReservationID,
-				ReplyText:     r.ReplyText,
-				PostID:        r.PostID,
-				TriggerKey:    r.TriggerKey,
-				CommentAt:     r.CommentAt.Format(time.RFC3339),
+				AccountID:     d.AccountID,
+				Kind:          d.Kind,
+				IgUserID:      d.IgUserID,
+				ObjectID:      d.ObjectID,
+				TargetUserID:  d.TargetUserID,
+				Text:          d.Text,
+				PostID:        d.PostID,
+				TriggerKey:    d.TriggerKey,
+				CommentAt:     d.CommentAt.Format(time.RFC3339),
+				Deadline:      d.Deadline.Format(time.RFC3339),
+				ReservationID: d.ReservationID,
 			})
 			if err != nil {
 				return fmt.Errorf("runner: marshal outbound payload: %w", err)
 			}
 			task := asynq.NewTask(ptasks.TaskOutboundSend, payload,
-				asynq.TaskID("outbound:"+r.CommentID), // idempotent: one retry chain per comment
+				asynq.TaskID("outbound:"+d.AccountID+":"+d.Kind+":"+d.TriggerKey),
 				asynq.ProcessIn(delay),
 				asynq.MaxRetry(outboundMaxRetry),
 			)
 			if _, err := asynqClient.EnqueueContext(ctx, task); err != nil {
+				// A TaskID collision means the identical retry is already
+				// scheduled (e.g. two same-Kind deferrals for one trigger) —
+				// idempotent success, mirroring apps/api enqueue ingest.
+				if errors.Is(err, asynq.ErrTaskIDConflict) || errors.Is(err, asynq.ErrDuplicateTask) {
+					return nil
+				}
 				return fmt.Errorf("runner: enqueue outbound: %w", err)
 			}
 			return nil
@@ -135,7 +157,7 @@ func New(
 	)
 
 	reg := workflow.NewRegistry()
-	seller.RegisterNodes(reg, svc, waPhone, enqueueOutbound)
+	seller.RegisterNodes(reg, svc, waPhone, enqueueDeferred)
 
 	eng := workflow.NewEngine(reg, []workflow.WorkflowDef{CommentToOrderWorkflow})
 
@@ -148,8 +170,8 @@ func New(
 	// libs/workflow/compile.go ever imports libs/kits/seller (§9 guardrail);
 	// only this apps/worker wiring layer is allowed to know about both.
 	fmap := workflow.FactoryMap{}
-	nodes.RegisterFactories(fmap)
-	seller.RegisterFactories(fmap, svc, waPhone, enqueueOutbound)
+	nodes.RegisterFactories(fmap, enqueueDeferred)
+	seller.RegisterFactories(fmap, svc, waPhone, enqueueDeferred)
 	compiler := workflow.NewCompiler(fmap)
 
 	return &Runner{

@@ -12,7 +12,7 @@ import (
 func buildPostSelectionFilter(t *testing.T, cfg string) workflow.Filter {
 	t.Helper()
 	fmap := workflow.FactoryMap{}
-	nodes.RegisterFactories(fmap)
+	nodes.RegisterFactories(fmap, nil)
 	built, err := fmap[nodes.NodeTypePostSelection].Build(json.RawMessage(cfg))
 	if err != nil {
 		t.Fatalf("Build error: %v", err)

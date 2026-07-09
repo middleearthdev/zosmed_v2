@@ -18,3 +18,11 @@ INSERT INTO processed_comment (
     @contact_handle
 )
 ON CONFLICT (ig_comment_id) DO NOTHING;
+
+-- name: ExistsProcessedComment :one
+-- Read-check for enqueue-first ordering (ADR-007 §2.2 step 2): lets the webhook
+-- handler skip re-delivered events BEFORE attempting to enqueue, and catches
+-- Meta retries that arrive after the asynq TaskID Retention window has expired.
+SELECT EXISTS (
+    SELECT 1 FROM processed_comment WHERE ig_comment_id = @ig_comment_id
+);

@@ -11,6 +11,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const existsProcessedComment = `-- name: ExistsProcessedComment :one
+SELECT EXISTS (
+    SELECT 1 FROM processed_comment WHERE ig_comment_id = $1
+)
+`
+
+// Read-check for enqueue-first ordering (ADR-007 §2.2 step 2): lets the webhook
+// handler skip re-delivered events BEFORE attempting to enqueue, and catches
+// Meta retries that arrive after the asynq TaskID Retention window has expired.
+func (q *Queries) ExistsProcessedComment(ctx context.Context, igCommentID string) (bool, error) {
+	row := q.db.QueryRow(ctx, existsProcessedComment, igCommentID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const insertProcessedComment = `-- name: InsertProcessedComment :execrows
 
 INSERT INTO processed_comment (

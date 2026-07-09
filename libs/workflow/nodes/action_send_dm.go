@@ -37,21 +37,28 @@ type sendDMConfig struct {
 // never opens the messaging window (§4c).
 type sendDMAction struct {
 	template string
+
+	// enqueueDeferred schedules an outbound:send retry when the gate returns
+	// DecisionQueue (ADR-007 §2.1); nil falls back to report-only.
+	enqueueDeferred EnqueueDeferredFunc
 }
 
-// BuildSendDM is the Factory.Build func for NodeTypeSendDM.
-func BuildSendDM(cfg json.RawMessage) (any, error) {
-	var c sendDMConfig
-	if len(cfg) > 0 {
-		if err := json.Unmarshal(cfg, &c); err != nil {
-			return nil, fmt.Errorf("nodes: send-dm: parse config: %w", err)
+// newSendDMFactory returns the Factory.Build func for NodeTypeSendDM, binding
+// enqueueDeferred (ADR-007 §3.7) into every built instance.
+func newSendDMFactory(enqueueDeferred EnqueueDeferredFunc) func(json.RawMessage) (any, error) {
+	return func(cfg json.RawMessage) (any, error) {
+		var c sendDMConfig
+		if len(cfg) > 0 {
+			if err := json.Unmarshal(cfg, &c); err != nil {
+				return nil, fmt.Errorf("nodes: send-dm: parse config: %w", err)
+			}
 		}
+		tmpl := c.Template
+		if strings.TrimSpace(tmpl) == "" {
+			tmpl = defaultSendDMTemplate
+		}
+		return &sendDMAction{template: tmpl, enqueueDeferred: enqueueDeferred}, nil
 	}
-	tmpl := c.Template
-	if strings.TrimSpace(tmpl) == "" {
-		tmpl = defaultSendDMTemplate
-	}
-	return &sendDMAction{template: tmpl}, nil
 }
 
 // Execute sends the DM. Guardrails (ADR-006 §2.3/§9, reviewer-enforced):
@@ -111,8 +118,30 @@ func (a *sendDMAction) Execute(ctx context.Context, rc *workflow.RunContext) (wo
 		return workflow.ActionResult{Detail: "DM terkirim"}, nil
 
 	case workflow.DecisionQueue:
+		// §10 overflow → antre, bukan ditolak (ADR-007 #3). Without an
+		// enqueueDeferred func wired, fall back to reporting deferred only
+		// (pre-ADR-007 behaviour, used by tests that don't exercise retry).
+		if a.enqueueDeferred == nil {
+			return workflow.ActionResult{
+				Detail: fmt.Sprintf("gate=queue (%s); DM ditunda (belum ada retry generik)", d.Reason),
+			}, nil
+		}
+		def := DeferredOutbound{
+			AccountID:    rc.Event.AccountID,
+			Kind:         sendDMKind,
+			IgUserID:     igUserID,
+			TargetUserID: rc.Event.FromID,
+			ObjectID:     rc.Event.ObjectID,
+			Text:         text,
+			CommentAt:    last,
+			TriggerKey:   rc.Event.ObjectID,
+			Deadline:     DeadlineFrom(last, MessagingWindow), // §4c: 24h from last interaction
+		}
+		if err := a.enqueueDeferred(ctx, def, DeferredRetryDelay); err != nil {
+			return workflow.ActionResult{}, fmt.Errorf("nodes: send-dm: enqueue deferred: %w", err)
+		}
 		return workflow.ActionResult{
-			Detail: fmt.Sprintf("gate=queue (%s); DM ditunda (belum ada retry generik)", d.Reason),
+			Detail: fmt.Sprintf("gate=queue (%s); DM diantre untuk retry", d.Reason),
 		}, nil
 
 	default: // DecisionReject

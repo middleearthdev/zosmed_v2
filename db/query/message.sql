@@ -5,3 +5,9 @@
 INSERT INTO processed_message (ig_message_id, account_id, subtype, contact_ig_user_id)
 VALUES (@ig_message_id, @account_id, @subtype, @contact_ig_user_id)
 ON CONFLICT (ig_message_id) DO NOTHING;
+
+-- name: ExistsProcessedMessage :one
+-- Read-check for enqueue-first ordering (ADR-007 §2.2, mirror ExistsProcessedComment).
+SELECT EXISTS (
+    SELECT 1 FROM processed_message WHERE ig_message_id = @ig_message_id
+);

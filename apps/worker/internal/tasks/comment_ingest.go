@@ -189,11 +189,28 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 			log.Debug("comment_ingest: no live workflow and not a keep-code order — skip")
 			return nil
 		}
+		// GUARDRAIL — invariant #6c (ADR-007 §2.3c): Engine.Run only returns a
+		// non-nil error for STRUCTURAL failures (trigger/filter/action node not
+		// found in registry, or wrong Kind) — never for an action/outbound send
+		// failing at runtime (libs/workflow/engine.go absorbs those into
+		// result.Err and still returns err==nil, see engine.go's runWorkflow).
+		// Those structural lookups can only fail before Compile validates the
+		// registry, and Compile has already run successfully by this point — so
+		// this branch is effectively unreachable, but IF it were ever hit it
+		// would still be a pre-outbound/pre-Triggered failure (asynq retry here
+		// is safe: no outbound has happened yet). Do NOT change this to return
+		// an error for anything action/outbound-related — that would retry a
+		// run whose outbound may have already fired (double-send risk, §4c).
 		result, err := h.r.Engine.Run(ctx, event, sender, h.r.Gate)
 		if err != nil {
 			return fmt.Errorf("comment_ingest: engine run (fallback): %w", err)
 		}
 		logEngineResult(log, "fallback built-in", result)
+		// GUARDRAIL — invariant #6c: once result.Triggered is true, this handler
+		// must only ever `return nil` from here on. RunStore.Insert is a
+		// non-outbound side effect logged (not retried) on failure — escalating
+		// it to a retryable error would re-run the whole workflow (including
+		// any outbound already sent) on the next asynq attempt.
 		// ADR-004 R2: only persist a run row when the event actually triggered.
 		if result.Triggered {
 			if err := h.r.RunStore.Insert(ctx, result, wfload.RunMeta{
@@ -227,6 +244,10 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 			continue
 		}
 
+		// GUARDRAIL — invariant #6c (ADR-007 §2.3c), same as the fallback branch
+		// above: eng.Run's error return is structural-only and pre-outbound
+		// (Compile, two lines up, already validated every node key this run
+		// could reference). Never widen this to cover action/outbound failures.
 		eng := workflow.NewEngine(reg, []workflow.WorkflowDef{def})
 		result, err := eng.Run(ctx, event, sender, h.r.Gate)
 		if err != nil {
@@ -238,6 +259,9 @@ func (h *CommentIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) e
 
 		logEngineResult(log, lw.Name, result)
 
+		// GUARDRAIL — invariant #6c: past this point (Triggered==true), the
+		// handler only ever `return nil`. RunStore.Insert failures are
+		// log-only, never retried (see fallback branch comment above).
 		workflowID, parseErr := uuidx.Parse(lw.PWF.ID)
 		if parseErr != nil {
 			log.Error("comment_ingest: parse workflow id", slog.String("error", parseErr.Error()))

@@ -91,7 +91,7 @@ func main() {
 	reconcileHandler := tasks.NewReservationReconcileHandler(r.DB, r.Svc, log)
 	outboundHandler := tasks.NewOutboundSendHandler(
 		r.DB, r.Gate, r.Svc,
-		func(token string) tasks.PrivateReplySender { return igapi.New(token) },
+		func(token string) tasks.OutboundSender { return igapi.New(token) },
 		log,
 	)
 

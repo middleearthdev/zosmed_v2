@@ -11,6 +11,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const existsProcessedMessage = `-- name: ExistsProcessedMessage :one
+SELECT EXISTS (
+    SELECT 1 FROM processed_message WHERE ig_message_id = $1
+)
+`
+
+// Read-check for enqueue-first ordering (ADR-007 §2.2, mirror ExistsProcessedComment).
+func (q *Queries) ExistsProcessedMessage(ctx context.Context, igMessageID string) (bool, error) {
+	row := q.db.QueryRow(ctx, existsProcessedMessage, igMessageID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const insertProcessedMessage = `-- name: InsertProcessedMessage :execrows
 
 INSERT INTO processed_message (ig_message_id, account_id, subtype, contact_ig_user_id)

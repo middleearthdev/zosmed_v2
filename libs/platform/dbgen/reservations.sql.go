@@ -36,6 +36,7 @@ INSERT INTO reservation (
     $9,
     $10
 )
+ON CONFLICT (account_id, ig_comment_id) DO NOTHING
 RETURNING id, account_id, catalog_post_id, product_id, code, ig_comment_id, contact_ig_user_id, contact_handle, status, hold_seconds, reserved_at, expires_at, closed_at, wa_link
 `
 
@@ -55,6 +56,13 @@ type CreateReservationParams struct {
 // Reservation CRUD + state machine queries (ADR-001 §2).
 // Guard: UpdateReservationStatus uses WHERE status = @expected_status to prevent
 // lost-update races when multiple workers process the same reservation concurrently.
+// Idempotent insert (ADR-007 §2.3b, #6b): ON CONFLICT (account_id, ig_comment_id)
+// DO NOTHING means a re-run (asynq retry) for a keep/C comment already reserved
+// returns ZERO rows -> pgx surfaces this as pgx.ErrNoRows ("no rows in result
+// set") from the :one QueryRow+Scan, exactly like GetProductByPostAndCode's
+// no-match case. Caller (libs/kits/seller ReservationService.Reserve) MUST
+// check isNoRows(err) and, on conflict, call GetReservationByComment to fetch
+// the existing reservation instead of treating this as a hard failure.
 func (q *Queries) CreateReservation(ctx context.Context, arg CreateReservationParams) (Reservation, error) {
 	row := q.db.QueryRow(ctx, createReservation,
 		arg.AccountID,
@@ -94,6 +102,41 @@ SELECT id, account_id, catalog_post_id, product_id, code, ig_comment_id, contact
 
 func (q *Queries) GetReservation(ctx context.Context, id pgtype.UUID) (Reservation, error) {
 	row := q.db.QueryRow(ctx, getReservation, id)
+	var i Reservation
+	err := row.Scan(
+		&i.ID,
+		&i.AccountID,
+		&i.CatalogPostID,
+		&i.ProductID,
+		&i.Code,
+		&i.IgCommentID,
+		&i.ContactIgUserID,
+		&i.ContactHandle,
+		&i.Status,
+		&i.HoldSeconds,
+		&i.ReservedAt,
+		&i.ExpiresAt,
+		&i.ClosedAt,
+		&i.WaLink,
+	)
+	return i, err
+}
+
+const getReservationByComment = `-- name: GetReservationByComment :one
+SELECT id, account_id, catalog_post_id, product_id, code, ig_comment_id, contact_ig_user_id, contact_handle, status, hold_seconds, reserved_at, expires_at, closed_at, wa_link FROM reservation
+WHERE account_id = $1
+  AND ig_comment_id = $2
+`
+
+type GetReservationByCommentParams struct {
+	AccountID   pgtype.UUID `json:"account_id"`
+	IgCommentID string      `json:"ig_comment_id"`
+}
+
+// Fetch the existing reservation for (account_id, ig_comment_id) when
+// CreateReservation hits the ON CONFLICT DO NOTHING branch above (ADR-007 #6b).
+func (q *Queries) GetReservationByComment(ctx context.Context, arg GetReservationByCommentParams) (Reservation, error) {
+	row := q.db.QueryRow(ctx, getReservationByComment, arg.AccountID, arg.IgCommentID)
 	var i Reservation
 	err := row.Scan(
 		&i.ID,

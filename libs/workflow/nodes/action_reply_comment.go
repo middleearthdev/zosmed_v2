@@ -35,21 +35,29 @@ type replyCommentConfig struct {
 // public and never touches the DM/private-reply quota.
 type replyCommentAction struct {
 	template string
+
+	// enqueueDeferred schedules an outbound:send retry when the gate returns
+	// DecisionQueue (ADR-007 §2.1); nil falls back to report-only.
+	enqueueDeferred EnqueueDeferredFunc
 }
 
-// BuildReplyComment is the Factory.Build func for NodeTypeReplyComment.
-func BuildReplyComment(cfg json.RawMessage) (any, error) {
-	var c replyCommentConfig
-	if len(cfg) > 0 {
-		if err := json.Unmarshal(cfg, &c); err != nil {
-			return nil, fmt.Errorf("nodes: reply-comment: parse config: %w", err)
+// newReplyCommentFactory returns the Factory.Build func for
+// NodeTypeReplyComment, binding enqueueDeferred (ADR-007 §3.7) into every
+// built instance.
+func newReplyCommentFactory(enqueueDeferred EnqueueDeferredFunc) func(json.RawMessage) (any, error) {
+	return func(cfg json.RawMessage) (any, error) {
+		var c replyCommentConfig
+		if len(cfg) > 0 {
+			if err := json.Unmarshal(cfg, &c); err != nil {
+				return nil, fmt.Errorf("nodes: reply-comment: parse config: %w", err)
+			}
 		}
+		tmpl := c.Template
+		if strings.TrimSpace(tmpl) == "" {
+			tmpl = defaultReplyCommentTemplate
+		}
+		return &replyCommentAction{template: tmpl, enqueueDeferred: enqueueDeferred}, nil
 	}
-	tmpl := c.Template
-	if strings.TrimSpace(tmpl) == "" {
-		tmpl = defaultReplyCommentTemplate
-	}
-	return &replyCommentAction{template: tmpl}, nil
 }
 
 // Execute posts the public reply. Guardrail (§10 one-door): rc.Gate.Allow is
@@ -58,12 +66,13 @@ func BuildReplyComment(cfg json.RawMessage) (any, error) {
 // send-whatsapp-link/seller.private-reply). Decision handling mirrors
 // sendWhatsAppLinkAction/seller.privateReplyAction exactly:
 //   - Allow  -> send via rc.Sender.ReplyToComment
-//   - Queue  -> deferred, reported only (no generic outbound-retry task yet —
-//     same TODO as send-whatsapp-link, ADR-004 roadmap)
+//   - Queue  -> enqueue a generic outbound:send retry (ADR-007 #3), or report
+//     deferred only if enqueueDeferred is nil
 //   - Reject -> skipped, reported only
 func (a *replyCommentAction) Execute(ctx context.Context, rc *workflow.RunContext) (workflow.ActionResult, error) {
 	nama := rc.Event.FromUsername
 	replyText := strings.ReplaceAll(a.template, "{nama}", nama)
+	commentAt := rawTime(rc.Event.Raw, rawKeyCommentAt)
 
 	req := workflow.OutboundReq{
 		AccountID:    rc.Event.AccountID,
@@ -71,7 +80,7 @@ func (a *replyCommentAction) Execute(ctx context.Context, rc *workflow.RunContex
 		TargetUserID: rc.Event.FromID,
 		TriggerKey:   rc.Event.ObjectID,
 		CommentID:    rc.Event.ObjectID,
-		CommentAt:    rawTime(rc.Event.Raw, rawKeyCommentAt),
+		CommentAt:    commentAt,
 		PostID:       rc.Event.MediaID,
 	}
 
@@ -89,8 +98,30 @@ func (a *replyCommentAction) Execute(ctx context.Context, rc *workflow.RunContex
 		return workflow.ActionResult{Detail: "balasan komentar publik terkirim"}, nil
 
 	case workflow.DecisionQueue:
+		// §10 overflow → antre, bukan ditolak (ADR-007 #3).
+		if a.enqueueDeferred == nil {
+			return workflow.ActionResult{
+				Detail: fmt.Sprintf("gate=queue (%s); balasan komentar ditunda (belum ada retry generik)", d.Reason),
+			}, nil
+		}
+		def := DeferredOutbound{
+			AccountID:    rc.Event.AccountID,
+			Kind:         replyCommentKind,
+			IgUserID:     rawString(rc.Event.Raw, rawKeyIgUserID),
+			TargetUserID: rc.Event.FromID,
+			ObjectID:     rc.Event.ObjectID,
+			Text:         replyText,
+			CommentAt:    commentAt,
+			PostID:       rc.Event.MediaID,
+			TriggerKey:   rc.Event.ObjectID,
+			// comment-reply has no §4c hard window (window.go) — use the fixed TTL.
+			Deadline: DeadlineFrom(commentAt, DeferredCommentReplyTTL),
+		}
+		if err := a.enqueueDeferred(ctx, def, DeferredRetryDelay); err != nil {
+			return workflow.ActionResult{}, fmt.Errorf("nodes: reply-comment: enqueue deferred: %w", err)
+		}
 		return workflow.ActionResult{
-			Detail: fmt.Sprintf("gate=queue (%s); balasan komentar ditunda (belum ada retry generik)", d.Reason),
+			Detail: fmt.Sprintf("gate=queue (%s); balasan komentar diantre untuk retry", d.Reason),
 		}, nil
 
 	default: // DecisionReject

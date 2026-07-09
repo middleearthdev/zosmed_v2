@@ -26,9 +26,11 @@ const (
 	// handler reads ListExpiredActiveReservations fresh from Postgres.
 	TaskReservationReconcile = "reservation:reconcile"
 
-	// TaskOutboundSend retries a private-reply that the safety gate deferred
-	// (Queue) when quota was exhausted (MAJOR-3b/§4c overflow → queue → send when
-	// quota recovers). Enqueued with a delay; the handler re-checks the gate.
+	// TaskOutboundSend retries ANY outbound IG message the safety gate deferred
+	// (Queue) when quota was exhausted (ADR-007 §2.1: §4c overflow → queue →
+	// send when quota recovers) — Kind-aware: private-reply, dm, or
+	// comment-reply. Enqueued with a delay; the handler re-checks the gate on
+	// every dequeue (§10 one-door) and drops the task once its Deadline passes.
 	TaskOutboundSend = "outbound:send"
 
 	// TaskDMIngest is enqueued when a webhook messaging event (DM, story
@@ -87,18 +89,34 @@ type DMIngestPayload struct {
 	EventAt string `json:"event_at"`
 }
 
-// OutboundSendPayload is the payload for TaskOutboundSend (MAJOR-2). It carries
-// everything needed to re-attempt the private reply, EXCEPT the token — the
-// worker looks that up per-account from Postgres (ADR-002 §6.2). CommentAt is
-// RFC3339 for the gate's 7-day window re-check.
+// OutboundSendPayload is the payload for TaskOutboundSend (ADR-007 §3.2). It
+// carries everything needed to re-attempt a deferred outbound IG message,
+// EXCEPT the token — the worker looks that up per-account from Postgres
+// (ADR-002 §6.2). CommentAt is RFC3339 for the gate's window re-check
+// (7-day private-reply / 24h dm); Deadline is RFC3339 for the §4c TTL
+// enforced by the handler BEFORE the gate is re-consulted (ADR-007 #3).
+//
+// Generalised from the seller-only payload (MAJOR-2) to a Kind-aware,
+// segment-neutral shape (ADR-007 #3): CommentID -> ObjectID (comment_id for
+// reply/private-reply, message id for dm) and ReplyText -> Text are renames;
+// this struct is worker-internal only (never a public API contract), so
+// renaming in one commit is safe.
 type OutboundSendPayload struct {
-	AccountID     string `json:"account_id"`
-	IgUserID      string `json:"ig_user_id"`
-	CommentID     string `json:"comment_id"`
-	TargetUserID  string `json:"target_user_id"`
-	ReservationID string `json:"reservation_id"`
-	ReplyText     string `json:"reply_text"`
-	PostID        string `json:"post_id"`
-	TriggerKey    string `json:"trigger_key"`
-	CommentAt     string `json:"comment_at"`
+	AccountID    string `json:"account_id"`
+	Kind         string `json:"kind"` // "private-reply" | "dm" | "comment-reply"
+	IgUserID     string `json:"ig_user_id"`
+	ObjectID     string `json:"object_id"` // comment_id | message id
+	TargetUserID string `json:"target_user_id"`
+	Text         string `json:"text"`
+	PostID       string `json:"post_id"`
+	TriggerKey   string `json:"trigger_key"`
+	CommentAt    string `json:"comment_at"`
+	Deadline     string `json:"deadline"`
+
+	// ReservationID is OPTIONAL — populated only by the seller kit's
+	// private-reply path (ADR-007 §2.1 point 4). A generic/neutral node never
+	// sets it; the handler guards every reservation-coupled step on
+	// ReservationID != "" so a neutral deployment (no seller kit wired) stays
+	// correct.
+	ReservationID string `json:"reservation_id,omitempty"`
 }

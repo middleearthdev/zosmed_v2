@@ -271,6 +271,74 @@ func TestDedupeDistinctTriggerAllowed(t *testing.T) {
 	}
 }
 
+// TestDedupeMultiKindNoCollision verifies that two DIFFERENT Kinds for the
+// same (account, user, trigger) do NOT collide on dedupe — this is the
+// ADR-007 §2.3a fix for the collision bug: a workflow
+// [reply-comment → send-whatsapp-link] on the same comment must deliver
+// BOTH outbound messages (comment-reply AND private-reply), not have the
+// second one wrongly Rejected as a duplicate of the first.
+func TestDedupeMultiKindNoCollision(t *testing.T) {
+	gate, _ := newTestGate(t)
+	ctx := context.Background()
+
+	commentAt := time.Now()
+
+	// Same account, same target user, same trigger (e.g. commentID) — only
+	// Kind differs, mirroring reply-comment then send-whatsapp-link on one comment.
+	replyReq := safety.OutboundReq{
+		AccountID:    "acc-multikind",
+		Kind:         safety.KindCommentReply,
+		TargetUserID: "user-multikind",
+		TriggerKey:   "comment-shared-1",
+		CommentID:    "comment-shared-1",
+		CommentAt:    commentAt,
+	}
+	privateReplyReq := safety.OutboundReq{
+		AccountID:    "acc-multikind",
+		Kind:         safety.KindPrivateReply,
+		TargetUserID: "user-multikind",
+		TriggerKey:   "comment-shared-1",
+		CommentID:    "comment-shared-1",
+		CommentAt:    commentAt,
+	}
+
+	d1, err := gate.Allow(ctx, replyReq)
+	if err != nil {
+		t.Fatalf("reply-comment Allow error: %v", err)
+	}
+	if d1.Action != safety.Allow {
+		t.Fatalf("expected Allow for comment-reply, got %s: %s", d1.Action, d1.Reason)
+	}
+
+	d2, err := gate.Allow(ctx, privateReplyReq)
+	if err != nil {
+		t.Fatalf("send-whatsapp-link (private-reply) Allow error: %v", err)
+	}
+	if d2.Action != safety.Allow {
+		t.Fatalf("expected Allow for private-reply (must NOT collide with comment-reply dedupe), got %s: %s", d2.Action, d2.Reason)
+	}
+
+	// Same Kind repeated (comment-reply again) with identical trigger MUST still
+	// dedupe-Reject — the fix must not weaken same-kind dedupe.
+	d3, err := gate.Allow(ctx, replyReq)
+	if err != nil {
+		t.Fatalf("repeated reply-comment Allow error: %v", err)
+	}
+	if d3.Action != safety.Reject {
+		t.Errorf("expected Reject on same-kind duplicate (comment-reply twice), got %s (reason: %s)", d3.Action, d3.Reason)
+	}
+
+	// Same Kind repeated (private-reply again) with identical trigger MUST still
+	// dedupe-Reject too.
+	d4, err := gate.Allow(ctx, privateReplyReq)
+	if err != nil {
+		t.Fatalf("repeated private-reply Allow error: %v", err)
+	}
+	if d4.Action != safety.Reject {
+		t.Errorf("expected Reject on same-kind duplicate (private-reply twice), got %s (reason: %s)", d4.Action, d4.Reason)
+	}
+}
+
 // ── Test: kill switch → Reject ────────────────────────────────────────────────
 
 // TestKillSwitchReject verifies that engaging the kill switch causes all

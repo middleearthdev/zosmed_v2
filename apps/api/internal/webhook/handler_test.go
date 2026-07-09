@@ -2,11 +2,12 @@ package webhook
 
 // handler_test.go — HTTP-layer integration tests for Handler.Challenge and Handler.Receive.
 //
-// Design note: Handler.Receive.processComment has a testability gap for the
-// "new comment + in-catalog → enqueue" path because enqueue.Client is a concrete
-// type (wraps *asynq.Client) with no interface extraction. This is documented as
-// BUG-001 in the test suite.  All paths reachable without that constraint are
-// covered below.
+// Historical note: processComment/processMessaging used to be untestable on
+// the "new event → enqueue" path because enqueue.Client was a concrete type
+// (wraps *asynq.Client) with no interface extraction — tracked as BUG-001.
+// ADR-007 Tahap D closed this by extracting enqueue.Enqueuer (see
+// enqueue/enqueue.go); fakeEnqueuer below is the resulting test double, used
+// by the enqueue-first ordering tests (ADR-007 §5 scenarios 6–8).
 
 import (
 	"bytes"
@@ -25,13 +26,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
+	"github.com/zosmed/zosmed/libs/platform/tasks"
 )
 
 // ── test helpers ─────────────────────────────────────────────────────────────
 
 // makeHandler creates a Handler with the given appSecret, verifyToken and
-// optional queries. enq is always nil here because no test below exercises
-// a path that reaches EnqueueCommentIngest (see BUG-001 above).
+// optional queries. enq is always nil here — every test using this helper
+// deliberately never exercises a path that reaches EnqueueCommentIngest/
+// EnqueueDMIngest (proven either by a skip returning cleanly, or by a
+// nil-enqueuer panic used as reachability proof). Tests that need to observe
+// enqueue calls use makeHandlerWithEnq instead.
 func makeHandler(t *testing.T, appSecret, verifyToken string, queries *dbgen.Queries) *Handler {
 	t.Helper()
 	return &Handler{
@@ -41,6 +46,41 @@ func makeHandler(t *testing.T, appSecret, verifyToken string, queries *dbgen.Que
 		verifyToken: verifyToken,
 		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+}
+
+// makeHandlerWithEnq creates a Handler wired with a fake Enqueuer (ADR-007
+// Tahap D) so tests can assert enqueue-first ordering: how many times
+// EnqueueCommentIngest/EnqueueDMIngest was called, and whether an enqueue
+// error propagates without a ledger write.
+func makeHandlerWithEnq(t *testing.T, queries *dbgen.Queries, enq *fakeEnqueuer) *Handler {
+	t.Helper()
+	return &Handler{
+		queries:     queries,
+		enq:         enq,
+		appSecret:   "secret",
+		verifyToken: "tok",
+		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+// fakeEnqueuer is a test double for enqueue.Enqueuer. Configurable per-call
+// errors + call counters let tests assert the enqueue-first ordering
+// contract (ADR-007 §2.2/§3.9) without a real asynq.Client/Redis.
+type fakeEnqueuer struct {
+	commentErr   error
+	dmErr        error
+	commentCalls int
+	dmCalls      int
+}
+
+func (f *fakeEnqueuer) EnqueueCommentIngest(_ context.Context, _ tasks.CommentIngestPayload) error {
+	f.commentCalls++
+	return f.commentErr
+}
+
+func (f *fakeEnqueuer) EnqueueDMIngest(_ context.Context, _ tasks.DMIngestPayload) error {
+	f.dmCalls++
+	return f.dmErr
 }
 
 // postSigned sends a POST to h.Receive with a correctly signed body.
@@ -67,16 +107,18 @@ func marshalPayload(t *testing.T, p MetaPayload) []byte {
 
 // fakeDedupeDTBX is a minimal dbgen.DBTX stub for testing the
 // account-resolution (ADR-002 §6.1) + dedupe + ingest-decoupling (ADR-005 §3
-// B1) path:
+// B1) path, reordered by ADR-007 §2.2/§3.9 (enqueue-first):
 //
-//	GetAccountByIgUserID (QueryRow) → InsertProcessedComment (Exec) →
-//	GetActiveCatalogPostByMedia (QueryRow) → HasLiveWorkflow (QueryRow)
+//	GetAccountByIgUserID (QueryRow) → ExistsProcessedComment/Message (QueryRow)
+//	→ GetActiveCatalogPostByMedia (QueryRow) → HasLiveWorkflow (QueryRow)
+//	→ [enqueue, not modelled by this DBTX] → InsertProcessedComment/Message (Exec)
 //
 // accountFound controls the account-lookup QueryRow leg: true → scans a
-// fixed "connected" account row so the flow proceeds to Exec; false →
-// pgx.ErrNoRows, modelling an unknown IGSID (AC-9: must skip safely, never
-// 500). catalogFound / hasLiveWorkflow / hasLiveWorkflowErr control the two
-// legs added by ADR-005 §3 B1's OR-based enqueue guard.
+// fixed "connected" account row so the flow proceeds; false → pgx.ErrNoRows,
+// modelling an unknown IGSID (AC-9: must skip safely, never 500).
+// catalogFound / hasLiveWorkflow / hasLiveWorkflowErr control the two legs
+// added by ADR-005 §3 B1's OR-based enqueue guard. existsProcessed /
+// existsProcessedErr control the ADR-007 dedupe read-check.
 //
 // QueryRow dispatches on the (stable, sqlc-generated) SQL text — same
 // pattern as apps/api/internal/auth/fakedb_test.go — so only the queries a
@@ -84,10 +126,16 @@ func marshalPayload(t *testing.T, p MetaPayload) []byte {
 type fakeDedupeDTBX struct {
 	execTag      pgconn.CommandTag
 	execErr      error
+	execCalls    int // counts InsertProcessedComment/Message calls (ledger writes)
 	accountFound bool
 	// accountScanErr, when non-nil, is returned by the GetAccountByIgUserID
 	// QueryRow scan to model a real DB failure (not ErrNoRows) — see M1.
 	accountScanErr error
+
+	// existsProcessed / existsProcessedErr control ExistsProcessedComment/
+	// ExistsProcessedMessage (ADR-007 §2.2 step 2 dedupe read-check).
+	existsProcessed    bool
+	existsProcessedErr error
 
 	// catalogFound controls GetActiveCatalogPostByMedia: true → a row is
 	// "found" (Scan succeeds, contents unused by the caller); false →
@@ -99,6 +147,7 @@ type fakeDedupeDTBX struct {
 }
 
 func (f *fakeDedupeDTBX) Exec(_ context.Context, _ string, _ ...interface{}) (pgconn.CommandTag, error) {
+	f.execCalls++
 	return f.execTag, f.execErr
 }
 
@@ -107,12 +156,14 @@ func (f *fakeDedupeDTBX) Query(_ context.Context, _ string, _ ...interface{}) (p
 	panic("fakeDedupeDTBX.Query: unexpected call — wrong code path in handler test")
 }
 
-// QueryRow dispatches by SQL text to the account/catalog/live-workflow
-// lookups exercised by processComment.
+// QueryRow dispatches by SQL text to the account/dedupe/catalog/live-workflow
+// lookups exercised by processComment/processMessaging.
 func (f *fakeDedupeDTBX) QueryRow(_ context.Context, sql string, _ ...interface{}) pgx.Row {
 	switch {
 	case strings.Contains(sql, "FROM account WHERE ig_user_id"):
 		return &fakeAccountRow{found: f.accountFound, scanErr: f.accountScanErr}
+	case strings.Contains(sql, "FROM processed_comment"), strings.Contains(sql, "FROM processed_message"):
+		return &fakeBoolRow{val: f.existsProcessed, err: f.existsProcessedErr}
 	case strings.Contains(sql, "FROM catalog_post"):
 		if !f.catalogFound {
 			return &fakeErrRow{err: pgx.ErrNoRows}
@@ -383,17 +434,17 @@ func TestReceive_CommentEmptyID_EarlyReturn(t *testing.T) {
 	}
 }
 
-// TestReceive_DuplicateComment_SkipsEnqueue verifies the ingest-layer dedupe:
-// when InsertProcessedComment returns 0 rows (ON CONFLICT DO NOTHING), the
-// comment is silently skipped and EnqueueCommentIngest is NOT called.
+// TestReceive_DuplicateComment_SkipsEnqueue verifies the ingest-layer dedupe
+// read-check (ADR-007 §2.2 step 2): when ExistsProcessedComment reports
+// true, the comment is silently skipped and EnqueueCommentIngest is NOT
+// called.
 //
-// Proof: h.enq is nil — if EnqueueCommentIngest were called, h.enq.c would
+// Proof: h.enq is nil — if EnqueueCommentIngest were called, it would
 // nil-dereference and panic, failing the test immediately.
 func TestReceive_DuplicateComment_SkipsEnqueue(t *testing.T) {
 	fakeDB := &fakeDedupeDTBX{
-		execTag:      pgconn.NewCommandTag("INSERT 0 0"), // 0 rows → duplicate
-		execErr:      nil,
-		accountFound: true, // account resolves so we reach the dedupe Exec
+		accountFound:    true, // account resolves so we reach the exists-check
+		existsProcessed: true, // already processed → skip before enqueue
 	}
 	queries := dbgen.New(fakeDB)
 	h := makeHandler(t, "secret", "tok", queries)
@@ -419,13 +470,14 @@ func TestReceive_DuplicateComment_SkipsEnqueue(t *testing.T) {
 	// Test not panicking proves enqueue was skipped (h.enq is nil).
 }
 
-// TestReceive_DBError_StillReturns200 verifies that a DB error in
-// InsertProcessedComment is logged but the handler still returns 200
-// (preventing Meta from retrying and causing duplicate enqueues).
+// TestReceive_DBError_StillReturns200 verifies that a DB error in the
+// ExistsProcessedComment read-check is logged but the handler still returns
+// 200 (preventing Meta from retrying and causing duplicate enqueues — Receive
+// never surfaces processComment's error as a non-200 response).
 func TestReceive_DBError_StillReturns200(t *testing.T) {
 	fakeDB := &fakeDedupeDTBX{
-		execErr:      errors.New("postgres: connection reset"),
-		accountFound: true, // account resolves so we reach the failing Exec
+		accountFound:       true, // account resolves so we reach the failing exists-check
+		existsProcessedErr: errors.New("postgres: connection reset"),
 	}
 	queries := dbgen.New(fakeDB)
 	h := makeHandler(t, "secret", "tok", queries)
@@ -519,7 +571,6 @@ func TestProcessComment_RealDBError_NotSwallowed(t *testing.T) {
 // still skipped safely (no enqueue attempt, no error).
 func TestProcessComment_NotInCatalogNoLiveWorkflow_SkipsSafely(t *testing.T) {
 	fakeDB := &fakeDedupeDTBX{
-		execTag:         pgconn.NewCommandTag("INSERT 0 1"),
 		accountFound:    true,
 		catalogFound:    false,
 		hasLiveWorkflow: false,
@@ -548,13 +599,11 @@ func TestProcessComment_NotInCatalogNoLiveWorkflow_SkipsSafely(t *testing.T) {
 // new OR branch (ADR-005 §3 B1): a comment on a non-catalog post still
 // reaches the enqueue step once the account has ≥1 `live` workflow — this is
 // what makes a generic [comment-received → reply-comment] workflow reachable
-// on ordinary comments. h.enq is nil in this test harness (BUG-001, see file
-// docstring), so reaching EnqueueCommentIngest panics with a nil-pointer
-// dereference; that panic IS the proof (the skip branch above returns
-// cleanly instead).
+// on ordinary comments. h.enq is nil in this test harness, so reaching
+// EnqueueCommentIngest panics with a nil-pointer dereference; that panic IS
+// the proof (the skip branch above returns cleanly instead).
 func TestProcessComment_NotInCatalogButHasLiveWorkflow_ReachesEnqueue(t *testing.T) {
 	fakeDB := &fakeDedupeDTBX{
-		execTag:         pgconn.NewCommandTag("INSERT 0 1"),
 		accountFound:    true,
 		catalogFound:    false,
 		hasLiveWorkflow: true,
@@ -588,7 +637,6 @@ func TestProcessComment_NotInCatalogButHasLiveWorkflow_ReachesEnqueue(t *testing
 func TestProcessComment_HasLiveWorkflowDBError_NotSwallowed(t *testing.T) {
 	dbErr := errors.New("redis-like transient failure")
 	fakeDB := &fakeDedupeDTBX{
-		execTag:            pgconn.NewCommandTag("INSERT 0 1"),
 		accountFound:       true,
 		catalogFound:       false,
 		hasLiveWorkflowErr: dbErr,
@@ -622,7 +670,6 @@ func TestProcessComment_HasLiveWorkflowDBError_NotSwallowed(t *testing.T) {
 // legacy seller pre-screen path is untouched by ADR-005 §3 B1).
 func TestProcessComment_InCatalog_SkipsLiveWorkflowCheck(t *testing.T) {
 	fakeDB := &fakeDedupeDTBX{
-		execTag:      pgconn.NewCommandTag("INSERT 0 1"),
 		accountFound: true,
 		catalogFound: true,
 	}
@@ -717,21 +764,145 @@ func TestRegression_Receive_ProhibitedFields_Returns200NoEnqueue(t *testing.T) {
 	}
 }
 
-// BUG-001 (design gap — reported, not patched):
+// ── ADR-007 §5: enqueue-first ordering (Tahap D, scenarios 6–8) ─────────────
 //
-// Handler.processComment contains a path:
-//   InsertProcessedComment (Exec) → GetActiveCatalogPostByMedia (QueryRow) → EnqueueCommentIngest
-//
-// The enqueuer field (h.enq *enqueue.Client) is a concrete type wrapping *asynq.Client.
-// There is no interface extraction that would allow injecting a fake enqueuer in tests.
-// Consequence: the "new comment in active catalog → enqueue" happy path is not unit-testable
-// without either:
-//   a) Extracting an Enqueuer interface in enqueue.go (1-line change to prod code), or
-//   b) Using a real asynq.Client backed by miniredis (requires adding alicebob/miniredis
-//      as a test dependency to apps/api/go.mod).
-//
-// Additionally, GetActiveCatalogPostByMedia uses QueryRow which returns pgx.Row (concrete
-// struct with unexported fields), making it impossible to fake the "catalog not found"
-// path without pgxmock.
-//
-// Recommended fix (low effort): extract Enqueuer interface in enqueue/enqueue.go.
+// These tests exercise processComment directly (not through Receive/postSigned)
+// so they can assert enqueue/ledger call counts precisely — closes BUG-001
+// (see file docstring): the enqueuer is now enqueue.Enqueuer, an interface,
+// so fakeEnqueuer can observe exactly what processComment does.
+
+// TestProcessComment_EnqueueFails_LedgerNotWritten_ThenRetrySucceeds is
+// scenario 6 (ADR-007 §5): when EnqueueCommentIngest fails (e.g. Redis down),
+// processComment must return an error WITHOUT writing the processed_comment
+// ledger — so a second delivery of the same event (Meta retry, or the
+// caller retrying) starts from a clean slate and can succeed once the queue
+// recovers.
+func TestProcessComment_EnqueueFails_LedgerNotWritten_ThenRetrySucceeds(t *testing.T) {
+	fakeDB := &fakeDedupeDTBX{
+		accountFound: true,
+		catalogFound: true, // short-circuits the live-workflow check
+	}
+	queries := dbgen.New(fakeDB)
+
+	ic := IngestComment{
+		EntryID: "igsid-1",
+		Value: CommentValue{
+			ID:    "cmt-enqfail-001",
+			Text:  "keep C1",
+			From:  CommentFrom{ID: "u1", Username: "buyer"},
+			Media: CommentMedia{ID: "media-catalog"},
+		},
+	}
+
+	// First delivery: enqueue fails (simulated Redis outage).
+	failingEnq := &fakeEnqueuer{commentErr: errors.New("redis: connection refused")}
+	h1 := makeHandlerWithEnq(t, queries, failingEnq)
+	if err := h1.processComment(context.Background(), ic); err == nil {
+		t.Fatal("expected error when enqueue fails")
+	}
+	if failingEnq.commentCalls != 1 {
+		t.Errorf("expected 1 enqueue attempt, got %d", failingEnq.commentCalls)
+	}
+	if fakeDB.execCalls != 0 {
+		t.Errorf("ledger must NOT be written when enqueue fails, got %d Exec call(s)", fakeDB.execCalls)
+	}
+
+	// Retry (same event, queue has recovered): enqueue now succeeds.
+	okEnq := &fakeEnqueuer{}
+	h2 := makeHandlerWithEnq(t, queries, okEnq)
+	if err := h2.processComment(context.Background(), ic); err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	if okEnq.commentCalls != 1 {
+		t.Errorf("expected 1 enqueue attempt on retry, got %d", okEnq.commentCalls)
+	}
+	if fakeDB.execCalls != 1 {
+		t.Errorf("expected ledger written exactly once after the successful retry, got %d", fakeDB.execCalls)
+	}
+}
+
+// TestProcessComment_EnqueueSucceedsLedgerFails_RedeliverConverges is
+// scenario 7 (ADR-007 §5): enqueue succeeds but the confirmation ledger
+// write (InsertProcessedComment) fails — processComment must NOT escalate
+// that into an error (the task is already durably enqueued; escalating would
+// cause pointless re-processing, and worse, risks a second distinct task if
+// the caller's retry logic assumed nothing was enqueued). A re-delivery of
+// the same event enqueues again — asynq.TaskID makes that idempotent at the
+// enqueue.Client layer (unit-tested in enqueue_test.go), so from this
+// handler's point of view it is just "enqueue returns nil again" — and the
+// ledger write now succeeds.
+func TestProcessComment_EnqueueSucceedsLedgerFails_RedeliverConverges(t *testing.T) {
+	fakeDB := &fakeDedupeDTBX{
+		accountFound: true,
+		catalogFound: true,
+		execErr:      errors.New("postgres: connection reset"), // ledger write fails first time
+	}
+	queries := dbgen.New(fakeDB)
+	enq := &fakeEnqueuer{}
+	h := makeHandlerWithEnq(t, queries, enq)
+
+	ic := IngestComment{
+		EntryID: "igsid-1",
+		Value: CommentValue{
+			ID:    "cmt-ledgerfail-001",
+			Text:  "keep C1",
+			From:  CommentFrom{ID: "u1", Username: "buyer"},
+			Media: CommentMedia{ID: "media-catalog"},
+		},
+	}
+
+	// First delivery: enqueue succeeds, ledger write fails — must NOT propagate.
+	if err := h.processComment(context.Background(), ic); err != nil {
+		t.Fatalf("expected nil error even though the ledger write failed, got %v", err)
+	}
+	if enq.commentCalls != 1 {
+		t.Errorf("expected 1 enqueue attempt, got %d", enq.commentCalls)
+	}
+	if fakeDB.execCalls != 1 {
+		t.Errorf("expected 1 ledger write attempt, got %d", fakeDB.execCalls)
+	}
+
+	// Re-deliver the same event: ExistsProcessedComment is still false (the
+	// ledger never landed), so the handler enqueues again and writes the
+	// ledger successfully this time.
+	fakeDB.execErr = nil
+	if err := h.processComment(context.Background(), ic); err != nil {
+		t.Fatalf("expected the re-delivery to converge, got %v", err)
+	}
+	if enq.commentCalls != 2 {
+		t.Errorf("expected 2 enqueue attempts total (idempotent via asynq.TaskID — no second task), got %d", enq.commentCalls)
+	}
+	if fakeDB.execCalls != 2 {
+		t.Errorf("expected 2 ledger write attempts total, got %d", fakeDB.execCalls)
+	}
+}
+
+// TestProcessComment_AlreadyProcessed_SkipsWithoutEnqueue is scenario 8
+// (ADR-007 §5): an event whose ledger row already exists (ExistsProcessedComment
+// == true) must be skipped WITHOUT any enqueue attempt at all.
+func TestProcessComment_AlreadyProcessed_SkipsWithoutEnqueue(t *testing.T) {
+	fakeDB := &fakeDedupeDTBX{accountFound: true, existsProcessed: true}
+	queries := dbgen.New(fakeDB)
+	enq := &fakeEnqueuer{}
+	h := makeHandlerWithEnq(t, queries, enq)
+
+	ic := IngestComment{
+		EntryID: "igsid-1",
+		Value: CommentValue{
+			ID:    "cmt-already-001",
+			Text:  "keep C1",
+			From:  CommentFrom{ID: "u1", Username: "buyer"},
+			Media: CommentMedia{ID: "media-catalog"},
+		},
+	}
+
+	if err := h.processComment(context.Background(), ic); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if enq.commentCalls != 0 {
+		t.Errorf("expected no enqueue attempt for an already-processed event, got %d", enq.commentCalls)
+	}
+	if fakeDB.execCalls != 0 {
+		t.Errorf("expected no ledger write for an already-processed event, got %d", fakeDB.execCalls)
+	}
+}

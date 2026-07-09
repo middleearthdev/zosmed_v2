@@ -1,328 +1,946 @@
 {
-  "info": {
-    "name": "Zosmed API (MVP)",
-    "_postman_id": "b1e7d2a0-0000-4a00-9000-zosmedmvp001",
-    "description": "Koleksi API Zosmed yang sudah dibangun (apps/api).\n\n**Base host:** `graph.instagram.com` (Instagram Login) untuk sisi IG; server internal default di `http://localhost:8080`.\n\n**Envelope respons** (kecuali webhook challenge yang plaintext):\n- Sukses: `{ \"data\": <T>, \"error\": null }`\n- Gagal: `{ \"data\": null, \"error\": { \"code\": \"...\", \"message\": \"...\" } }`\n\n**Auth:** endpoint `/api/v1/*` saat ini memakai `AuthStub` (no-op) untuk MVP — belum perlu token. Webhook & connect bersifat publik (dipanggil Meta), dilindungi verify-token / HMAC / signed-state.\n\nAtur variabel koleksi (`baseUrl`, `accountId`, `postId`, `reservationId`, `igVerifyToken`, `igAppSecret`) di tab Variables sebelum menjalankan.",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+ "info": {
+  "name": "Zosmed API (MVP)",
+  "_postman_id": "b1e7d2a0-0000-4a00-9000-zosmedmvp001",
+  "description": "Koleksi API Zosmed yang sudah dibangun (apps/api).\n\n**Base host:** `graph.instagram.com` (Instagram Login) untuk sisi IG; server internal default di `http://localhost:8080`.\n\n**Envelope respons** (kecuali webhook challenge yang plaintext):\n- Sukses: `{ \"data\": <T>, \"error\": null }`\n- Gagal: `{ \"data\": null, \"error\": { \"code\": \"...\", \"message\": \"...\" } }`\n\n**Auth:** `Auth & Onboarding` memakai sesi cookie `zsid` (login dulu, Postman menyimpan cookie otomatis). Endpoint `Workflows (Builder)` & `Comment-to-Order`/`Reservations` butuh sesi + akun IG terhubung (seed dev). Webhook & connect bersifat publik (dipanggil Meta), dilindungi verify-token / HMAC / signed-state.\n\n**Redis wajib nyala** untuk webhook ingest: sejak ADR-007 handler webhook meng-enqueue task asynq SEBELUM menulis ledger dedupe — tanpa Redis, event ditolak-proses (tapi tidak hilang; delivery berikutnya memproses ulang). Worker (`apps/worker`) harus jalan agar task ingest/outbound benar-benar dieksekusi.\n\nAtur variabel koleksi (`baseUrl`, `accountId`, `postId`, `reservationId`, `workflowId`, `igVerifyToken`, `igAppSecret`) di tab Variables sebelum menjalankan.",
+  "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+ },
+ "variable": [
+  {
+   "key": "baseUrl",
+   "value": "http://localhost:8080",
+   "type": "string"
   },
-  "variable": [
-    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" },
-    { "key": "accountId", "value": "aaaaaaaa-0000-0000-0000-000000000001", "type": "string" },
-    { "key": "postId", "value": "bbbbbbbb-0000-0000-0000-000000000002", "type": "string" },
-    { "key": "reservationId", "value": "dddddddd-0000-0000-0000-000000000004", "type": "string" },
-    { "key": "igVerifyToken", "value": "my-verify-token", "type": "string" },
-    { "key": "igAppSecret", "value": "my-app-secret", "type": "string" },
-    { "key": "hubChallenge", "value": "challenge-echo-123", "type": "string" },
-    { "key": "hubSignature", "value": "", "type": "string" },
-    { "key": "demoEmail", "value": "demo@zosmed.test", "type": "string" },
-    { "key": "demoPassword", "value": "demo12345", "type": "string" }
-  ],
-  "item": [
+  {
+   "key": "accountId",
+   "value": "aaaaaaaa-0000-0000-0000-000000000001",
+   "type": "string"
+  },
+  {
+   "key": "postId",
+   "value": "bbbbbbbb-0000-0000-0000-000000000002",
+   "type": "string"
+  },
+  {
+   "key": "reservationId",
+   "value": "dddddddd-0000-0000-0000-000000000004",
+   "type": "string"
+  },
+  {
+   "key": "igVerifyToken",
+   "value": "my-verify-token",
+   "type": "string"
+  },
+  {
+   "key": "igAppSecret",
+   "value": "my-app-secret",
+   "type": "string"
+  },
+  {
+   "key": "hubChallenge",
+   "value": "challenge-echo-123",
+   "type": "string"
+  },
+  {
+   "key": "hubSignature",
+   "value": "",
+   "type": "string"
+  },
+  {
+   "key": "demoEmail",
+   "value": "demo@zosmed.test",
+   "type": "string"
+  },
+  {
+   "key": "demoPassword",
+   "value": "demo12345",
+   "type": "string"
+  },
+  {
+   "key": "workflowId",
+   "value": "",
+   "type": "string",
+   "description": "Isi dari respons Create Workflow"
+  }
+ ],
+ "item": [
+  {
+   "name": "Auth & Onboarding",
+   "description": "Login/registrasi + onboarding (ADR-003). Sesi via cookie httpOnly `zsid` — Postman menyimpan cookie di **cookie jar** per-domain otomatis, jadi setelah **Login**/**Register** semua request lain (me, onboarding, logout) ikut terkirim cookie-nya tanpa setup manual.\n\nAlur cepat: **Login** (seed: `demo@zosmed.test`/`demo12345`) → **Get Me** → **Set Segment** → **Complete Onboarding** → **Logout**.",
+   "item": [
     {
-      "name": "Auth & Onboarding",
-      "description": "Login/registrasi + onboarding (ADR-003). Sesi via cookie httpOnly `zsid` — Postman menyimpan cookie di **cookie jar** per-domain otomatis, jadi setelah **Login**/**Register** semua request lain (me, onboarding, logout) ikut terkirim cookie-nya tanpa setup manual.\n\nAlur cepat: **Login** (seed: `demo@zosmed.test`/`demo12345`) → **Get Me** → **Set Segment** → **Complete Onboarding** → **Logout**.",
-      "item": [
-        {
-          "name": "Register",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"baru@zosmed.test\",\n  \"password\": \"password123\",\n  \"segment\": \"seller\"\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/auth/register",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "auth", "register"]
-            },
-            "description": "Daftar user baru (publik) + langsung login (set cookie `zsid`). `201 {user}`. `409 email_taken` bila email sudah ada; `400 invalid_request` bila email invalid / password <8 atau >72 byte / segmen tak dikenal. `segment` opsional.\n\nCatatan: user baru BELUM punya akun IG connected — Complete Onboarding akan 409 sampai akun IG ditautkan (butuh OAuth nyata). Untuk uji onboarding tuntas tanpa Instagram, pakai user seed via Login."
-          },
-          "response": []
-        },
-        {
-          "name": "Login",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{demoEmail}}\",\n  \"password\": \"{{demoPassword}}\"\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/auth/login",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "auth", "login"]
-            },
-            "description": "Login (publik). Sukses `200 {user, account}` + set cookie `zsid`. Password salah / email tak ada → `401 invalid_credentials` (respons & timing sama untuk keduanya — anti user-enumeration). Kredensial seed default sudah diisi via variabel `demoEmail`/`demoPassword`."
-          },
-          "response": []
-        },
-        {
-          "name": "Get Me",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/auth/me",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "auth", "me"]
-            },
-            "description": "Sesi saat ini (butuh cookie `zsid`). `200 {user:{id,email,segment,onboardingCompleted}, account:{status,handle,displayName}|null}`. Tanpa cookie / sesi invalid → `401 unauthorized`. Tidak pernah memuat password_hash / access_token."
-          },
-          "response": []
-        },
-        {
-          "name": "Set Segment (onboarding step 1)",
-          "request": {
-            "method": "PUT",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"segment\": \"seller\"\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/onboarding/segment",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "onboarding", "segment"]
-            },
-            "description": "Simpan segmen bisnis user (butuh login). `200 {user}`. Nilai valid: `seller` (jualan). `creator`/`booking` fase lanjutan. `400` bila segmen tak dikenal. user_id diambil dari sesi — bukan body (tanpa IDOR)."
-          },
-          "response": []
-        },
-        {
-          "name": "Complete Onboarding",
-          "request": {
-            "method": "POST",
-            "header": [],
-            "body": { "mode": "raw", "raw": "" },
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/onboarding/complete",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "onboarding", "complete"]
-            },
-            "description": "Tandai onboarding selesai (butuh login). Syarat: segmen sudah dipilih DAN akun IG `connected`. `200 {user}` bila lengkap; `409 onboarding_incomplete` (+ `reason`, mis. `account_not_connected`) bila belum. User seed sudah punya akun connected → langsung 200 setelah Set Segment."
-          },
-          "response": []
-        },
-        {
-          "name": "Logout",
-          "request": {
-            "method": "POST",
-            "header": [],
-            "body": { "mode": "raw", "raw": "" },
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/auth/logout",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "auth", "logout"]
-            },
-            "description": "Revoke sesi + hapus cookie `zsid` (aman dipanggil tanpa sesi). `200 {ok:true}`. Setelah ini, Get Me → 401."
-          },
-          "response": []
-        }
-      ]
+     "name": "Register",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"email\": \"baru@zosmed.test\",\n  \"password\": \"password123\",\n  \"segment\": \"seller\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/auth/register",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "auth",
+        "register"
+       ]
+      },
+      "description": "Daftar user baru (publik) + langsung login (set cookie `zsid`). `201 {user}`. `409 email_taken` bila email sudah ada; `400 invalid_request` bila email invalid / password <8 atau >72 byte / segmen tak dikenal. `segment` opsional.\n\nCatatan: user baru BELUM punya akun IG connected — Complete Onboarding akan 409 sampai akun IG ditautkan (butuh OAuth nyata). Untuk uji onboarding tuntas tanpa Instagram, pakai user seed via Login."
+     },
+     "response": []
     },
     {
-      "name": "Instagram Login (Connect)",
-      "description": "Business Login for Instagram (ADR-002 §3). Dipakai dari browser, bukan dari Postman untuk alur penuh — tapi endpoint bisa diinspeksi di sini.",
-      "item": [
-        {
-          "name": "Start OAuth (redirect ke Instagram)",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/connect/instagram",
-              "host": ["{{baseUrl}}"],
-              "path": ["connect", "instagram"]
-            },
-            "description": "302 redirect ke `https://www.instagram.com/oauth/authorize` dengan scope `instagram_business_*` + signed state (anti-CSRF). Buka URL ini di browser untuk memulai koneksi akun. Postman akan menampilkan header `Location`."
-          },
-          "response": []
-        },
-        {
-          "name": "OAuth Callback",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/connect/instagram/callback?code=THE_CODE_FROM_INSTAGRAM&state=THE_SIGNED_STATE",
-              "host": ["{{baseUrl}}"],
-              "path": ["connect", "instagram", "callback"],
-              "query": [
-                { "key": "code", "value": "THE_CODE_FROM_INSTAGRAM" },
-                { "key": "state", "value": "THE_SIGNED_STATE" }
-              ]
-            },
-            "description": "Dipanggil oleh Instagram setelah user mengizinkan akses. Server memverifikasi `state`, menukar `code` → token pendek → token panjang (~60 hari), memanggil `GET /me` untuk IGSID, menyimpan ke tabel `account`, lalu 302 ke `/settings?connected=1`. `code` & `state` asli hanya berlaku dari alur browser."
-          },
-          "response": []
-        }
-      ]
+     "name": "Login",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"email\": \"{{demoEmail}}\",\n  \"password\": \"{{demoPassword}}\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/auth/login",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "auth",
+        "login"
+       ]
+      },
+      "description": "Login (publik). Sukses `200 {user, account}` + set cookie `zsid`. Password salah / email tak ada → `401 invalid_credentials` (respons & timing sama untuk keduanya — anti user-enumeration). Kredensial seed default sudah diisi via variabel `demoEmail`/`demoPassword`."
+     },
+     "response": []
     },
     {
-      "name": "Webhooks (Meta)",
-      "description": "Endpoint yang dipanggil Meta (produk Instagram). Tanpa auth aplikasi; verifikasi via verify-token (GET) dan HMAC-SHA256 App Secret (POST).",
-      "item": [
-        {
-          "name": "Webhook Verify Challenge",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/webhooks/meta?hub.mode=subscribe&hub.verify_token={{igVerifyToken}}&hub.challenge={{hubChallenge}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["webhooks", "meta"],
-              "query": [
-                { "key": "hub.mode", "value": "subscribe" },
-                { "key": "hub.verify_token", "value": "{{igVerifyToken}}" },
-                { "key": "hub.challenge", "value": "{{hubChallenge}}" }
-              ]
-            },
-            "description": "Meta memanggil ini saat subscribe. Jika `hub.verify_token` == `IG_VERIFY_TOKEN` server → balas `hub.challenge` sebagai **plaintext 200**. Salah token / mode → 403."
-          },
-          "response": []
-        },
-        {
-          "name": "Webhook Receive (comments)",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// Hitung X-Hub-Signature-256 = 'sha256=' + HMAC-SHA256(rawBody, IG_APP_SECRET).",
-                  "// PENTING: body harus literal (tanpa {{var}}) agar hash cocok dengan yang dikirim.",
-                  "const secret = pm.collectionVariables.get('igAppSecret');",
-                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
-                  "const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
-                  "pm.collectionVariables.set('hubSignature', 'sha256=' + hmac);"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" },
-              { "key": "X-Hub-Signature-256", "value": "{{hubSignature}}" }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"object\": \"instagram\",\n  \"entry\": [\n    {\n      \"id\": \"17841400000000000\",\n      \"time\": 1751709600,\n      \"changes\": [\n        {\n          \"field\": \"comments\",\n          \"value\": {\n            \"id\": \"17800000000000000\",\n            \"text\": \"keep C1 kak, masih ready?\",\n            \"from\": { \"id\": \"9988776655\", \"username\": \"buyer_demo\" },\n            \"media\": { \"id\": \"17900000000000000\" }\n          }\n        }\n      ]\n    }\n  ]\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/webhooks/meta",
-              "host": ["{{baseUrl}}"],
-              "path": ["webhooks", "meta"]
-            },
-            "description": "Event komentar masuk. Server: verifikasi HMAC (403 jika salah) → dedupe → resolusi akun via `entry.id` (IGSID) → filter media di katalog aktif → enqueue `comment:ingest`. Balas `200 {\"data\":{\"received\":true},\"error\":null}`.\n\nPre-request script menghitung signature otomatis dari `igAppSecret`. Ubah `entry.id` / `media.id` agar cocok dengan akun & catalog_post di DB kamu untuk alur end-to-end. Field id komentar toleran `id` ATAU `comment_id`."
-          },
-          "response": []
-        }
-      ]
+     "name": "Get Me",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/auth/me",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "auth",
+        "me"
+       ]
+      },
+      "description": "Sesi saat ini (butuh cookie `zsid`). `200 {user:{id,email,segment,onboardingCompleted}, account:{status,handle,displayName}|null}`. Tanpa cookie / sesi invalid → `401 unauthorized`. Tidak pernah memuat password_hash / access_token."
+     },
+     "response": []
     },
     {
-      "name": "Comment-to-Order",
-      "description": "Data layar Comment-to-Order (ADR-001 §4.2–§4.4). Group `/api/v1` (AuthStub no-op untuk MVP).",
-      "item": [
-        {
-          "name": "Get Comment-Order (agregat layar)",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/comment-order?accountId={{accountId}}&postId={{postId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "comment-order"],
-              "query": [
-                { "key": "accountId", "value": "{{accountId}}" },
-                { "key": "postId", "value": "{{postId}}" }
-              ]
-            },
-            "description": "Satu fetch untuk seluruh panel: `postCommentsLabel`, `comments[]`, `stats[]` (code-detected/reserved-now/closed-wa/expired), `reservations[]`, `products[]`. `accountId` & `postId` = UUID Postgres. 404 `post_not_found` jika post tak ada."
-          },
-          "response": []
-        },
-        {
-          "name": "Get Keyword Settings",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/comment-order/settings?accountId={{accountId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "comment-order", "settings"],
-              "query": [
-                { "key": "accountId", "value": "{{accountId}}" }
-              ]
-            },
-            "description": "Ambil pengaturan keyword per akun: `{ keywords[], holdSeconds, replyTemplate }`. Bila belum ada baris → kembalikan default (keyword seller kit)."
-          },
-          "response": []
-        },
-        {
-          "name": "Update Keyword Settings",
-          "request": {
-            "method": "PUT",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"keywords\": [\"keep\", \"C1\", \"C3\", \"mau\"],\n  \"holdSeconds\": 300,\n  \"replyTemplate\": \"Halo kak {nama}! Kode {kode} untuk {produk} sudah dicatat ya \\u2705 Lanjut ke WhatsApp buat closing: {wa_link}\"\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/comment-order/settings?accountId={{accountId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "comment-order", "settings"],
-              "query": [
-                { "key": "accountId", "value": "{{accountId}}" }
-              ]
-            },
-            "description": "Upsert pengaturan. Field kosong diisi default (keywords → seller kit, holdSeconds → 300). Placeholder template: `{nama}`, `{kode}`, `{produk}`, `{wa_link}`."
-          },
-          "response": []
-        }
-      ]
+     "name": "Set Segment (onboarding step 1)",
+     "request": {
+      "method": "PUT",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"segment\": \"seller\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/onboarding/segment",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "onboarding",
+        "segment"
+       ]
+      },
+      "description": "Simpan segmen bisnis user (butuh login). `200 {user}`. Nilai valid: `seller` (jualan). `creator`/`booking` fase lanjutan. `400` bila segmen tak dikenal. user_id diambil dari sesi — bukan body (tanpa IDOR)."
+     },
+     "response": []
     },
     {
-      "name": "Reservations",
-      "description": "Aksi reservasi (comment-to-order state machine).",
-      "item": [
-        {
-          "name": "Get Reservation (detail)",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/reservations/{{reservationId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "reservations", "{{reservationId}}"]
-            },
-            "description": "Detail satu reservasi: `{ id, code, buyerHandle, product, priceLabel, status, countdownLabel, expiresAt }`. 404 jika tak ditemukan."
-          },
-          "response": []
-        },
-        {
-          "name": "Close Reservation (waiting-pay -> closed-wa)",
-          "request": {
-            "method": "POST",
-            "header": [],
-            "body": {
-              "mode": "raw",
-              "raw": ""
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/reservations/{{reservationId}}/close",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "reservations", "{{reservationId}}", "close"]
-            },
-            "description": "Tandai reservasi sebagai closed (deal lewat WA). Hanya valid dari status `waiting-pay`; selain itu → 409 `invalid_transition`. Body kosong. Mengembalikan `ReservationDTO` terbaru."
-          },
-          "response": []
-        }
-      ]
+     "name": "Complete Onboarding",
+     "request": {
+      "method": "POST",
+      "header": [],
+      "body": {
+       "mode": "raw",
+       "raw": ""
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/onboarding/complete",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "onboarding",
+        "complete"
+       ]
+      },
+      "description": "Tandai onboarding selesai (butuh login). Syarat: segmen sudah dipilih DAN akun IG `connected`. `200 {user}` bila lengkap; `409 onboarding_incomplete` (+ `reason`, mis. `account_not_connected`) bila belum. User seed sudah punya akun connected → langsung 200 setelah Set Segment."
+     },
+     "response": []
+    },
+    {
+     "name": "Logout",
+     "request": {
+      "method": "POST",
+      "header": [],
+      "body": {
+       "mode": "raw",
+       "raw": ""
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/auth/logout",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "auth",
+        "logout"
+       ]
+      },
+      "description": "Revoke sesi + hapus cookie `zsid` (aman dipanggil tanpa sesi). `200 {ok:true}`. Setelah ini, Get Me → 401."
+     },
+     "response": []
     }
-  ]
+   ]
+  },
+  {
+   "name": "Instagram Login (Connect)",
+   "description": "Business Login for Instagram (ADR-002 §3). Dipakai dari browser, bukan dari Postman untuk alur penuh — tapi endpoint bisa diinspeksi di sini.",
+   "item": [
+    {
+     "name": "Start OAuth (redirect ke Instagram)",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/connect/instagram",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "connect",
+        "instagram"
+       ]
+      },
+      "description": "302 redirect ke `https://www.instagram.com/oauth/authorize` dengan scope `instagram_business_*` + signed state (anti-CSRF). Buka URL ini di browser untuk memulai koneksi akun. Postman akan menampilkan header `Location`."
+     },
+     "response": []
+    },
+    {
+     "name": "OAuth Callback",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/connect/instagram/callback?code=THE_CODE_FROM_INSTAGRAM&state=THE_SIGNED_STATE",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "connect",
+        "instagram",
+        "callback"
+       ],
+       "query": [
+        {
+         "key": "code",
+         "value": "THE_CODE_FROM_INSTAGRAM"
+        },
+        {
+         "key": "state",
+         "value": "THE_SIGNED_STATE"
+        }
+       ]
+      },
+      "description": "Dipanggil oleh Instagram setelah user mengizinkan akses. Server memverifikasi `state`, menukar `code` → token pendek → token panjang (~60 hari), memanggil `GET /me` untuk IGSID, menyimpan ke tabel `account`, lalu 302 ke `/settings?connected=1`. `code` & `state` asli hanya berlaku dari alur browser."
+     },
+     "response": []
+    }
+   ]
+  },
+  {
+   "name": "Webhooks (Meta)",
+   "description": "Simulasi payload webhook Meta (produk Instagram, §4.0). Contoh memakai nilai SEED dev: `entry.id = SEED-IG-0001` (akun `@olshop.aurora`), `media.id = SEED-MEDIA-0001`, keep code `C1`/`C2` — langsung jalan setelah seed. Redis harus nyala (enqueue-first ADR-007) dan worker jalan agar event diproses. Dedupe: `comment_id`/`mid` yang sama di-skip — ganti id untuk event 'baru'.",
+   "item": [
+    {
+     "name": "Webhook Verify Challenge",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/webhooks/meta?hub.mode=subscribe&hub.verify_token={{igVerifyToken}}&hub.challenge={{hubChallenge}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "webhooks",
+        "meta"
+       ],
+       "query": [
+        {
+         "key": "hub.mode",
+         "value": "subscribe"
+        },
+        {
+         "key": "hub.verify_token",
+         "value": "{{igVerifyToken}}"
+        },
+        {
+         "key": "hub.challenge",
+         "value": "{{hubChallenge}}"
+        }
+       ]
+      },
+      "description": "Meta memanggil ini saat subscribe. Jika `hub.verify_token` == `IG_VERIFY_TOKEN` server → balas `hub.challenge` sebagai **plaintext 200**. Salah token / mode → 403."
+     },
+     "response": []
+    },
+    {
+     "name": "Webhook Receive (comments)",
+     "event": [
+      {
+       "listen": "prerequest",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "// Hitung X-Hub-Signature-256 = 'sha256=' + HMAC-SHA256(rawBody, IG_APP_SECRET).",
+         "// PENTING: body harus literal (tanpa {{var}}) agar hash cocok dengan yang dikirim.",
+         "const secret = pm.collectionVariables.get('igAppSecret');",
+         "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+         "const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+         "pm.collectionVariables.set('hubSignature', 'sha256=' + hmac);"
+        ]
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "X-Hub-Signature-256",
+        "value": "{{hubSignature}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"object\": \"instagram\",\n  \"entry\": [\n    {\n      \"id\": \"SEED-IG-0001\",\n      \"time\": 1751709600,\n      \"changes\": [\n        {\n          \"field\": \"comments\",\n          \"value\": {\n            \"id\": \"17800000000000000\",\n            \"text\": \"keep C1 kak, masih ready?\",\n            \"from\": { \"id\": \"9988776655\", \"username\": \"buyer_demo\" },\n            \"media\": { \"id\": \"SEED-MEDIA-0001\" }\n          }\n        }\n      ]\n    }\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/webhooks/meta",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "webhooks",
+        "meta"
+       ]
+      },
+      "description": "Event komentar masuk. Server (urutan ADR-007 enqueue-first): verifikasi HMAC (403 jika salah) → resolusi akun via `entry.id` (IGSID) → read-check ledger `processed_comment` (sudah ada → skip) → filter media di katalog aktif / workflow live → enqueue `comment:ingest` (asynq TaskID=`ingest:comment:{comment_id}` + Retention 24h; duplikat = sukses) → BARU tulis ledger. Enqueue gagal (Redis down) → ledger TIDAK ditulis, event diproses ulang pada delivery berikutnya — tidak ada kehilangan senyap. Balas `200 {\"data\":{\"received\":true},\"error\":null}`.\n\nPre-request script menghitung signature otomatis dari `igAppSecret`. Payload sudah memakai nilai seed dev (`SEED-IG-0001` / `SEED-MEDIA-0001`, keep code `C1`/`C2`) — langsung jalan end-to-end setelah `go run ./apps/api/cmd/seed`. Untuk akun nyata, ganti dengan IGSID/media milikmu. Field id komentar toleran `id` ATAU `comment_id`."
+     },
+     "response": []
+    },
+    {
+     "name": "Webhook Receive (DM masuk)",
+     "event": [
+      {
+       "listen": "prerequest",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "// Hitung X-Hub-Signature-256 = 'sha256=' + HMAC-SHA256(rawBody, IG_APP_SECRET).",
+         "// PENTING: body harus literal (tanpa {{var}}) agar hash cocok dengan yang dikirim.",
+         "const secret = pm.collectionVariables.get('igAppSecret');",
+         "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+         "const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+         "pm.collectionVariables.set('hubSignature', 'sha256=' + hmac);"
+        ]
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "X-Hub-Signature-256",
+        "value": "{{hubSignature}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"object\": \"instagram\",\n  \"entry\": [\n    {\n      \"id\": \"SEED-IG-0001\",\n      \"time\": 1751709600,\n      \"messaging\": [\n        {\n          \"sender\": {\n            \"id\": \"9988776655\"\n          },\n          \"recipient\": {\n            \"id\": \"SEED-IG-0001\"\n          },\n          \"timestamp\": 1751709600000,\n          \"message\": {\n            \"mid\": \"mid.demo.dm.001\",\n            \"text\": \"halo kak, produknya masih ready?\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/webhooks/meta",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "webhooks",
+        "meta"
+       ]
+      },
+      "description": "Event DM masuk (ADR-006, subtype `dm`) — permukaan `entry[].messaging[]` (field `messages`), BUKAN `changes[]`. Identitas = IGSID (§4.0): `sender.id` = contact, `entry.id` = akun.\n\nServer (urutan ADR-007 enqueue-first): verifikasi HMAC → skip echo/self (sender==entry.id) → resolve akun → read-check `processed_message` → cek workflow live → enqueue `dm:ingest` (TaskID=`ingest:dm:{mid}`) → BARU tulis ledger. Worker meng-update `conversation.last_interaction_at` (window 24h §4c) lalu menjalankan workflow live.\n\nGanti `mid` tiap kirim ulang — mid yang sama akan di-skip dedupe (itu justru cara menguji idempotensi ADR-007)."
+     },
+     "response": []
+    },
+    {
+     "name": "Webhook Receive (story reply)",
+     "event": [
+      {
+       "listen": "prerequest",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "// Hitung X-Hub-Signature-256 = 'sha256=' + HMAC-SHA256(rawBody, IG_APP_SECRET).",
+         "// PENTING: body harus literal (tanpa {{var}}) agar hash cocok dengan yang dikirim.",
+         "const secret = pm.collectionVariables.get('igAppSecret');",
+         "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+         "const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+         "pm.collectionVariables.set('hubSignature', 'sha256=' + hmac);"
+        ]
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "X-Hub-Signature-256",
+        "value": "{{hubSignature}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"object\": \"instagram\",\n  \"entry\": [\n    {\n      \"id\": \"SEED-IG-0001\",\n      \"time\": 1751709600,\n      \"messaging\": [\n        {\n          \"sender\": {\n            \"id\": \"9988776655\"\n          },\n          \"recipient\": {\n            \"id\": \"SEED-IG-0001\"\n          },\n          \"timestamp\": 1751709600000,\n          \"message\": {\n            \"mid\": \"mid.demo.storyreply.001\",\n            \"text\": \"wah lucu banget kak!\",\n            \"reply_to\": {\n              \"story\": {\n                \"id\": \"17900000000000099\",\n                \"url\": \"https://cdn.example/story.jpg\"\n              }\n            }\n          }\n        }\n      ]\n    }\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/webhooks/meta",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "webhooks",
+        "meta"
+       ]
+      },
+      "description": "Balasan Story (ADR-006, subtype `story-reply`) — ditandai `message.reply_to.story`. Membuka window 24h (§4c). Alur server sama seperti DM masuk (enqueue-first ADR-007); trigger node `story-reply` yang akan menyala."
+     },
+     "response": []
+    },
+    {
+     "name": "Webhook Receive (story mention)",
+     "event": [
+      {
+       "listen": "prerequest",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "// Hitung X-Hub-Signature-256 = 'sha256=' + HMAC-SHA256(rawBody, IG_APP_SECRET).",
+         "// PENTING: body harus literal (tanpa {{var}}) agar hash cocok dengan yang dikirim.",
+         "const secret = pm.collectionVariables.get('igAppSecret');",
+         "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+         "const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+         "pm.collectionVariables.set('hubSignature', 'sha256=' + hmac);"
+        ]
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "X-Hub-Signature-256",
+        "value": "{{hubSignature}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"object\": \"instagram\",\n  \"entry\": [\n    {\n      \"id\": \"SEED-IG-0001\",\n      \"time\": 1751709600,\n      \"messaging\": [\n        {\n          \"sender\": {\n            \"id\": \"9988776655\"\n          },\n          \"recipient\": {\n            \"id\": \"SEED-IG-0001\"\n          },\n          \"timestamp\": 1751709600000,\n          \"message\": {\n            \"mid\": \"mid.demo.storymention.001\",\n            \"attachments\": [\n              {\n                \"type\": \"story_mention\",\n                \"payload\": {\n                  \"url\": \"https://cdn.example/mention.jpg\"\n                }\n              }\n            ]\n          }\n        }\n      ]\n    }\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/webhooks/meta",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "webhooks",
+        "meta"
+       ]
+      },
+      "description": "Mention di Story (ADR-006, subtype `story-mention`) — ditandai `message.attachments[].type == \"story_mention\"` (BUKAN `changes[].mentions`, koreksi B0). Trigger node `story-mention` yang akan menyala."
+     },
+     "response": []
+    },
+    {
+     "name": "Webhook Receive (click-to-DM ad referral)",
+     "event": [
+      {
+       "listen": "prerequest",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "// Hitung X-Hub-Signature-256 = 'sha256=' + HMAC-SHA256(rawBody, IG_APP_SECRET).",
+         "// PENTING: body harus literal (tanpa {{var}}) agar hash cocok dengan yang dikirim.",
+         "const secret = pm.collectionVariables.get('igAppSecret');",
+         "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+         "const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+         "pm.collectionVariables.set('hubSignature', 'sha256=' + hmac);"
+        ]
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "X-Hub-Signature-256",
+        "value": "{{hubSignature}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"object\": \"instagram\",\n  \"entry\": [\n    {\n      \"id\": \"SEED-IG-0001\",\n      \"time\": 1751709600,\n      \"messaging\": [\n        {\n          \"sender\": {\n            \"id\": \"9988776655\"\n          },\n          \"recipient\": {\n            \"id\": \"SEED-IG-0001\"\n          },\n          \"timestamp\": 1751709600000,\n          \"referral\": {\n            \"ref\": \"promo-lebaran\",\n            \"ad_id\": \"1234567890\",\n            \"source\": \"ADS\",\n            \"type\": \"OPEN_THREAD\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/webhooks/meta",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "webhooks",
+        "meta"
+       ]
+      },
+      "description": "Ad-referral / click-to-DM (ADR-006, subtype `ad-referral`) — contoh ini varian TOP-LEVEL `referral` (thread lama, `messaging_referral`). Varian thread-baru menaruh `referral` DI DALAM `message` (bersama `mid`). Tanpa `message.mid`, server mensintesis MessageID stabil (`ref:{entry}:{ts}:{ref}`) agar tetap ter-dedupe. Trigger node `click-to-dm-ad` menyala; `ref` tersedia bagi node sebagai `adRef`."
+     },
+     "response": []
+    }
+   ]
+  },
+  {
+   "name": "Workflows (Builder)",
+   "description": "CRUD workflow builder + runs (ADR-004/005). SEMUA endpoint butuh sesi login — jalankan `Auth & Onboarding → Login` dulu (cookie `zsid` tersimpan otomatis oleh Postman) dan user harus punya akun IG terhubung (seed dev sudah menyediakannya; tanpa akun → 409 `account_not_connected`).\n\nAkun di-resolve dari sesi (MVP: 1 user ↔ 1 akun) — tidak ada query param `accountId`.\n\nNode kinds runnable: trigger `comment-received|comment-to-order|dm-received|story-reply|story-mention|click-to-dm-ad`, filter `keyword-match|conversation-state|post-selection|time-window`, action `reply-comment|send-dm|send-whatsapp-link|reserve-stock|outbound-webhook`.",
+   "item": [
+    {
+     "name": "List Workflows",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/workflows",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "workflows"
+       ]
+      },
+      "description": "Daftar workflow milik akun (ringkasan: id, name, status, segment, nodeCount)."
+     },
+     "response": []
+    },
+    {
+     "name": "Create Workflow",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/workflows",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "workflows"
+       ]
+      },
+      "description": "Buat workflow kosong (status `draft`). `segment` ∈ seller/creator/booking. Simpan `id` dari respons ke variabel `workflowId`.",
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"name\": \"Workflow baru\",\n  \"segment\": \"seller\"\n}"
+      }
+     },
+     "response": []
+    },
+    {
+     "name": "Get Workflow (graph)",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/workflows/{{workflowId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "workflows",
+        "{{workflowId}}"
+       ]
+      },
+      "description": "Detail workflow + nodes + edges."
+     },
+     "response": []
+    },
+    {
+     "name": "Save Workflow (graph)",
+     "request": {
+      "method": "PUT",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/workflows/{{workflowId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "workflows",
+        "{{workflowId}}"
+       ]
+      },
+      "description": "Simpan graph penuh (replace). `id` node bersifat lokal-request (korelasi edges) — server selalu menerbitkan UUID baru. `config` divalidasi per node saat activate/compile, bukan saat save.",
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"name\": \"Balas komentar promo\",\n  \"nodes\": [\n    {\n      \"id\": \"n1\",\n      \"label\": \"Komentar masuk\",\n      \"node\": {\n        \"category\": \"trigger\",\n        \"kind\": \"comment-received\"\n      },\n      \"config\": {},\n      \"position\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    {\n      \"id\": \"n2\",\n      \"label\": \"Cocokkan kata kunci\",\n      \"node\": {\n        \"category\": \"filter\",\n        \"kind\": \"keyword-match\"\n      },\n      \"config\": {\n        \"keywords\": [\n          \"promo\",\n          \"diskon\"\n        ],\n        \"caseInsensitive\": true\n      },\n      \"position\": {\n        \"x\": 0,\n        \"y\": 160\n      }\n    },\n    {\n      \"id\": \"n3\",\n      \"label\": \"Balas komentar\",\n      \"node\": {\n        \"category\": \"action\",\n        \"kind\": \"reply-comment\"\n      },\n      \"config\": {\n        \"template\": \"Sudah kami DM ya kak 🙌\"\n      },\n      \"position\": {\n        \"x\": 0,\n        \"y\": 320\n      }\n    }\n  ],\n  \"edges\": [\n    {\n      \"from\": \"n1\",\n      \"to\": \"n2\"\n    },\n    {\n      \"from\": \"n2\",\n      \"to\": \"n3\"\n    }\n  ]\n}"
+      }
+     },
+     "response": []
+    },
+    {
+     "name": "Activate Workflow",
+     "request": {
+      "method": "POST",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/workflows/{{workflowId}}/activate",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "workflows",
+        "{{workflowId}}",
+        "activate"
+       ]
+      },
+      "description": "draft/paused → live. Validasi: minimal satu trigger runnable, graph terhubung. Gagal → 400 dengan alasan (mis. `trigger_not_runnable`)."
+     },
+     "response": []
+    },
+    {
+     "name": "Pause Workflow",
+     "request": {
+      "method": "POST",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/workflows/{{workflowId}}/pause",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "workflows",
+        "{{workflowId}}",
+        "pause"
+       ]
+      },
+      "description": "live → paused. Event baru tidak lagi menjalankan workflow ini."
+     },
+     "response": []
+    },
+    {
+     "name": "List Runs (per workflow)",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/workflows/{{workflowId}}/runs?limit=20",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "workflows",
+        "{{workflowId}}",
+        "runs"
+       ],
+       "query": [
+        {
+         "key": "limit",
+         "value": "20"
+        }
+       ]
+      },
+      "description": "Riwayat eksekusi workflow ini (layar Runs)."
+     },
+     "response": []
+    },
+    {
+     "name": "List Runs (per akun)",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/runs?limit=20",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "runs"
+       ],
+       "query": [
+        {
+         "key": "limit",
+         "value": "20"
+        }
+       ]
+      },
+      "description": "Riwayat eksekusi semua workflow milik akun."
+     },
+     "response": []
+    },
+    {
+     "name": "Delete Workflow",
+     "request": {
+      "method": "DELETE",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/workflows/{{workflowId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "workflows",
+        "{{workflowId}}"
+       ]
+      },
+      "description": "Hapus workflow beserta nodes/edges-nya."
+     },
+     "response": []
+    }
+   ]
+  },
+  {
+   "name": "Comment-to-Order",
+   "description": "Data layar Comment-to-Order (ADR-001 §4.2–§4.4). Group `/api/v1` (AuthStub no-op untuk MVP).",
+   "item": [
+    {
+     "name": "Get Comment-Order (agregat layar)",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/comment-order?accountId={{accountId}}&postId={{postId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "comment-order"
+       ],
+       "query": [
+        {
+         "key": "accountId",
+         "value": "{{accountId}}"
+        },
+        {
+         "key": "postId",
+         "value": "{{postId}}"
+        }
+       ]
+      },
+      "description": "Satu fetch untuk seluruh panel: `postCommentsLabel`, `comments[]`, `stats[]` (code-detected/reserved-now/closed-wa/expired), `reservations[]`, `products[]`. `accountId` & `postId` = UUID Postgres. 404 `post_not_found` jika post tak ada."
+     },
+     "response": []
+    },
+    {
+     "name": "Get Keyword Settings",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/comment-order/settings?accountId={{accountId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "comment-order",
+        "settings"
+       ],
+       "query": [
+        {
+         "key": "accountId",
+         "value": "{{accountId}}"
+        }
+       ]
+      },
+      "description": "Ambil pengaturan keyword per akun: `{ keywords[], holdSeconds, replyTemplate }`. Bila belum ada baris → kembalikan default (keyword seller kit)."
+     },
+     "response": []
+    },
+    {
+     "name": "Update Keyword Settings",
+     "request": {
+      "method": "PUT",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"keywords\": [\"keep\", \"C1\", \"C3\", \"mau\"],\n  \"holdSeconds\": 300,\n  \"replyTemplate\": \"Halo kak {nama}! Kode {kode} untuk {produk} sudah dicatat ya \\u2705 Lanjut ke WhatsApp buat closing: {wa_link}\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/comment-order/settings?accountId={{accountId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "comment-order",
+        "settings"
+       ],
+       "query": [
+        {
+         "key": "accountId",
+         "value": "{{accountId}}"
+        }
+       ]
+      },
+      "description": "Upsert pengaturan. Field kosong diisi default (keywords → seller kit, holdSeconds → 300). Placeholder template: `{nama}`, `{kode}`, `{produk}`, `{wa_link}`."
+     },
+     "response": []
+    }
+   ]
+  },
+  {
+   "name": "Reservations",
+   "description": "Aksi reservasi (comment-to-order state machine).",
+   "item": [
+    {
+     "name": "Get Reservation (detail)",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/reservations/{{reservationId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "reservations",
+        "{{reservationId}}"
+       ]
+      },
+      "description": "Detail satu reservasi: `{ id, code, buyerHandle, product, priceLabel, status, countdownLabel, expiresAt }`. 404 jika tak ditemukan."
+     },
+     "response": []
+    },
+    {
+     "name": "Close Reservation (waiting-pay -> closed-wa)",
+     "request": {
+      "method": "POST",
+      "header": [],
+      "body": {
+       "mode": "raw",
+       "raw": ""
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/reservations/{{reservationId}}/close",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "reservations",
+        "{{reservationId}}",
+        "close"
+       ]
+      },
+      "description": "Tandai reservasi sebagai closed (deal lewat WA). Hanya valid dari status `waiting-pay`; selain itu → 409 `invalid_transition`. Body kosong. Mengembalikan `ReservationDTO` terbaru."
+     },
+     "response": []
+    }
+   ]
+  }
+ ]
 }

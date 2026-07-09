@@ -37,11 +37,12 @@ var (
 // stubDB implements the reservationDB interface used by ReservationService.
 // All methods are set as fields so individual tests can customise behaviour.
 type stubDB struct {
-	getProduct        func(ctx context.Context, arg dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error)
-	decrementStock    func(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
-	incrementStock    func(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
-	createReservation func(ctx context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error)
-	updateResStatus   func(ctx context.Context, arg dbgen.UpdateReservationStatusParams) (dbgen.Reservation, error)
+	getProduct              func(ctx context.Context, arg dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error)
+	decrementStock          func(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
+	incrementStock          func(ctx context.Context, id pgtype.UUID) (dbgen.Product, error)
+	createReservation       func(ctx context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error)
+	getReservationByComment func(ctx context.Context, arg dbgen.GetReservationByCommentParams) (dbgen.Reservation, error)
+	updateResStatus         func(ctx context.Context, arg dbgen.UpdateReservationStatusParams) (dbgen.Reservation, error)
 }
 
 func (s *stubDB) GetProductByPostAndCode(ctx context.Context, arg dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
@@ -55,6 +56,9 @@ func (s *stubDB) IncrementStock(ctx context.Context, id pgtype.UUID) (dbgen.Prod
 }
 func (s *stubDB) CreateReservation(ctx context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error) {
 	return s.createReservation(ctx, arg)
+}
+func (s *stubDB) GetReservationByComment(ctx context.Context, arg dbgen.GetReservationByCommentParams) (dbgen.Reservation, error) {
+	return s.getReservationByComment(ctx, arg)
 }
 func (s *stubDB) UpdateReservationStatus(ctx context.Context, arg dbgen.UpdateReservationStatusParams) (dbgen.Reservation, error) {
 	return s.updateResStatus(ctx, arg)
@@ -290,6 +294,75 @@ func TestReserve_Success_Commits(t *testing.T) {
 	}
 }
 
+// TestReserve_Idempotent_ConflictRollsBackAndReturnsExisting verifies
+// ADR-007 §2.3b (#6b): when CreateReservation reports the ON CONFLICT
+// DO NOTHING branch (isNoRows) for a comment that was already reserved by an
+// earlier attempt, Reserve must:
+//   - roll back the tx (so the DecrementStock above is undone — no double
+//     decrement),
+//   - return the EXISTING reservation (via GetReservationByComment) with a
+//     nil error (idempotent success, not a hard failure),
+//   - NOT enqueue a second expire timer.
+func TestReserve_Idempotent_ConflictRollsBackAndReturnsExisting(t *testing.T) {
+	existing := reservedReservation()
+	decremented := 0
+	lookedUpWith := dbgen.GetReservationByCommentParams{}
+
+	db := &stubDB{
+		getProduct: func(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
+			return okProduct(), nil
+		},
+		decrementStock: func(_ context.Context, _ pgtype.UUID) (dbgen.Product, error) {
+			decremented++
+			return okProduct(), nil
+		},
+		createReservation: func(_ context.Context, _ dbgen.CreateReservationParams) (dbgen.Reservation, error) {
+			// Simulates the UNIQUE(account_id, ig_comment_id) ON CONFLICT DO
+			// NOTHING branch (db/query/reservations.sql) surfacing as zero rows.
+			return dbgen.Reservation{}, errNoRows
+		},
+		getReservationByComment: func(_ context.Context, arg dbgen.GetReservationByCommentParams) (dbgen.Reservation, error) {
+			lookedUpWith = arg
+			return existing, nil
+		},
+	}
+	runner := &recordingTxRunner{db: db}
+	enqueued := 0
+	svc := seller.NewReservationServiceTx(db, runner, func(_ context.Context, _ string, _ time.Duration) error {
+		enqueued++
+		return nil
+	})
+
+	result, err := svc.Reserve(context.Background(),
+		testAccountID, testCatalogPostID, "C1",
+		"comment-dup", "user-dup", "Dupa", "6281234567890", 0)
+
+	if err != nil {
+		t.Fatalf("Reserve should be idempotent (no error) on conflict, got: %v", err)
+	}
+	if result.Reservation.ID != existing.ID {
+		t.Errorf("expected the existing reservation to be returned, got %+v", result.Reservation)
+	}
+	if result.ProductName != "Kaos Ungu M" {
+		t.Errorf("expected ProductName still populated from the product lookup, got %q", result.ProductName)
+	}
+	if lookedUpWith.IgCommentID != "comment-dup" {
+		t.Errorf("GetReservationByComment called with ig_comment_id=%q, want comment-dup", lookedUpWith.IgCommentID)
+	}
+	if !runner.rolledBack {
+		t.Error("tx must roll back on CreateReservation conflict (stock not double-decremented)")
+	}
+	if runner.committed {
+		t.Error("tx must NOT commit on conflict")
+	}
+	if decremented != 1 {
+		t.Errorf("DecrementStock should be attempted once inside the (rolled-back) tx, got %d calls", decremented)
+	}
+	if enqueued != 0 {
+		t.Error("expire timer must NOT be re-enqueued for an already-reserved comment")
+	}
+}
+
 // ── MarkWaitingPay tests ──────────────────────────────────────────────────────
 
 func TestMarkWaitingPay_ReservedToWaitingPay(t *testing.T) {
@@ -456,6 +529,158 @@ func TestExpire_NoOpWhenAlreadyTerminal(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("expected 2 guard attempts, got %d", calls)
+	}
+}
+
+// ── ADR-007 §5 scenario 11: ingest-rerun-level Reserve idempotency ───────────
+//
+// TestReserve_Idempotent_ConflictRollsBackAndReturnsExisting (above) proves
+// the conflict BRANCH in isolation by hand-crafting CreateReservation's
+// ON-CONFLICT response. The test below instead calls svc.Reserve TWICE with
+// the identical (account, comment) pair — modelling an actual asynq re-run of
+// comment:ingest end-to-end — against a stateful fake DB (no real Postgres,
+// per the ADR-007 §5 scenario 11 note: "tambahkan level ingest-rerun bila
+// feasible tanpa Postgres nyata"). rollbackAwareTxRunner undoes the stock
+// decrement on any fn error, the same externally-visible effect a real
+// Postgres transaction rollback gives NewPgxTxRunner in production — so this
+// is the smallest fake that can honestly assert "stock decremented once net
+// across both calls", not just "DecrementStock was attempted once".
+
+// statefulReservationDB is a stateful (not scripted) ReservationDB double:
+// stock and reservations actually mutate across calls, so two svc.Reserve
+// calls in a row behave like two real database round-trips.
+type statefulReservationDB struct {
+	product      dbgen.Product
+	stockLeft    int32
+	reservations map[string]dbgen.Reservation // keyed by ig_comment_id
+
+	decrementCalls int
+	createCalls    int
+	nextSeq        int
+}
+
+func (d *statefulReservationDB) GetProductByPostAndCode(_ context.Context, _ dbgen.GetProductByPostAndCodeParams) (dbgen.Product, error) {
+	p := d.product
+	p.StockLeft = d.stockLeft
+	return p, nil
+}
+
+func (d *statefulReservationDB) DecrementStock(_ context.Context, _ pgtype.UUID) (dbgen.Product, error) {
+	d.decrementCalls++
+	if d.stockLeft <= 0 {
+		return dbgen.Product{}, errNoRows
+	}
+	d.stockLeft--
+	p := d.product
+	p.StockLeft = d.stockLeft
+	return p, nil
+}
+
+func (d *statefulReservationDB) IncrementStock(_ context.Context, _ pgtype.UUID) (dbgen.Product, error) {
+	d.stockLeft++
+	p := d.product
+	p.StockLeft = d.stockLeft
+	return p, nil
+}
+
+func (d *statefulReservationDB) CreateReservation(_ context.Context, arg dbgen.CreateReservationParams) (dbgen.Reservation, error) {
+	d.createCalls++
+	if _, exists := d.reservations[arg.IgCommentID]; exists {
+		// Models the real UNIQUE(account_id, ig_comment_id) ON CONFLICT DO
+		// NOTHING branch (db/query/reservations.sql) surfacing as zero rows.
+		return dbgen.Reservation{}, errNoRows
+	}
+	d.nextSeq++
+	res := dbgen.Reservation{
+		ID:            mustUUID(fmt.Sprintf("eeeeeeee-0000-0000-0000-%012d", d.nextSeq)),
+		AccountID:     arg.AccountID,
+		CatalogPostID: arg.CatalogPostID,
+		ProductID:     arg.ProductID,
+		Code:          arg.Code,
+		Status:        dbgen.ReservationStatusReserved,
+		HoldSeconds:   arg.HoldSeconds,
+		ExpiresAt:     arg.ExpiresAt,
+		WaLink:        arg.WaLink,
+	}
+	d.reservations[arg.IgCommentID] = res
+	return res, nil
+}
+
+func (d *statefulReservationDB) GetReservationByComment(_ context.Context, arg dbgen.GetReservationByCommentParams) (dbgen.Reservation, error) {
+	res, ok := d.reservations[arg.IgCommentID]
+	if !ok {
+		return dbgen.Reservation{}, errNoRows
+	}
+	return res, nil
+}
+
+func (d *statefulReservationDB) UpdateReservationStatus(_ context.Context, _ dbgen.UpdateReservationStatusParams) (dbgen.Reservation, error) {
+	return dbgen.Reservation{}, errNoRows
+}
+
+// rollbackAwareTxRunner undoes the stock decrement when fn returns an error —
+// the same externally-observable effect a real Postgres ROLLBACK has on
+// NewPgxTxRunner in production (MAJOR-3a).
+type rollbackAwareTxRunner struct{ db *statefulReservationDB }
+
+func (r rollbackAwareTxRunner) InTx(_ context.Context, fn func(q seller.ReservationDB) error) error {
+	stockBefore := r.db.stockLeft
+	if err := fn(r.db); err != nil {
+		r.db.stockLeft = stockBefore
+		return err
+	}
+	return nil
+}
+
+// TestReserve_RerunSameComment_IngestLevel_StockDecrementedOnce is ADR-007
+// §5 scenario 11 at the ingest-rerun level: calling svc.Reserve TWICE for the
+// SAME (account, comment) — as an asynq retry of comment:ingest would —
+// must produce exactly ONE reservation, decrement stock exactly ONCE net,
+// enqueue exactly ONE expire timer, and return the SAME reservation both
+// times (idempotent success, not a hard failure on the second call).
+func TestReserve_RerunSameComment_IngestLevel_StockDecrementedOnce(t *testing.T) {
+	seed := okProduct()
+	db := &statefulReservationDB{
+		product:      seed,
+		stockLeft:    seed.StockLeft,
+		reservations: map[string]dbgen.Reservation{},
+	}
+	runner := rollbackAwareTxRunner{db: db}
+	enqueueCalls := 0
+	svc := seller.NewReservationServiceTx(db, runner, func(_ context.Context, _ string, _ time.Duration) error {
+		enqueueCalls++
+		return nil
+	})
+
+	result1, err := svc.Reserve(context.Background(),
+		testAccountID, testCatalogPostID, "C1",
+		"comment-rerun-1", "user-1", "Rina", "6281234567890", 0)
+	if err != nil {
+		t.Fatalf("first Reserve (initial ingest run): %v", err)
+	}
+
+	// Simulated asynq re-run of the SAME comment:ingest task (identical
+	// account+comment) — e.g. a crash/retry after the first Reserve already
+	// committed.
+	result2, err := svc.Reserve(context.Background(),
+		testAccountID, testCatalogPostID, "C1",
+		"comment-rerun-1", "user-1", "Rina", "6281234567890", 0)
+	if err != nil {
+		t.Fatalf("second (rerun) Reserve: expected idempotent success, got error: %v", err)
+	}
+
+	if result1.Reservation.ID != result2.Reservation.ID {
+		t.Errorf("expected the SAME reservation on rerun, got %v vs %v", result1.Reservation.ID, result2.Reservation.ID)
+	}
+	if db.createCalls != 2 {
+		t.Errorf("expected 2 CreateReservation attempts (1 insert + 1 conflict), got %d", db.createCalls)
+	}
+	wantStock := seed.StockLeft - 1
+	if db.stockLeft != wantStock {
+		t.Errorf("expected stock decremented exactly ONCE net across both Reserve calls: stockLeft=%d, want %d", db.stockLeft, wantStock)
+	}
+	if enqueueCalls != 1 {
+		t.Errorf("expected exactly 1 expire timer enqueued (not re-enqueued on rerun), got %d", enqueueCalls)
 	}
 }
 

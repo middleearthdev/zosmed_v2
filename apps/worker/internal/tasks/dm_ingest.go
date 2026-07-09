@@ -171,6 +171,16 @@ func (h *DMIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) error 
 			continue
 		}
 
+		// GUARDRAIL — invariant #6c (ADR-007 §2.3c): eng.Run only returns a
+		// non-nil error for STRUCTURAL failures (trigger/filter/action node not
+		// found in registry, or wrong Kind) — never for an action/outbound send
+		// failing at runtime (libs/workflow/engine.go absorbs those into
+		// result.Err and still returns err==nil). Compile, two lines up, has
+		// already validated every node key this run could reference, so this
+		// branch is effectively unreachable and — even if hit — is pre-outbound
+		// (safe to retry). Do NOT widen this to cover action/outbound failures:
+		// that would let asynq retry a run whose outbound may already have
+		// fired (double-send risk, §4c).
 		eng := workflow.NewEngine(reg, []workflow.WorkflowDef{def})
 		result, err := eng.Run(ctx, event, sender, h.r.Gate)
 		if err != nil {
@@ -182,6 +192,9 @@ func (h *DMIngestHandler) ProcessTask(ctx context.Context, t *asynq.Task) error 
 
 		logEngineResult(log, lw.Name, result)
 
+		// GUARDRAIL — invariant #6c: past this point (Triggered==true), the
+		// handler only ever `return nil`. RunStore.Insert is a non-outbound
+		// side effect; its failure is logged, never escalated into a retry.
 		workflowID, parseErr := uuidx.Parse(lw.PWF.ID)
 		if parseErr != nil {
 			log.Error("dm_ingest: parse workflow id", slog.String("error", parseErr.Error()))

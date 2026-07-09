@@ -20,6 +20,7 @@ import (
 	"github.com/zosmed/zosmed/libs/platform/dbgen"
 	"github.com/zosmed/zosmed/libs/platform/uuidx"
 	"github.com/zosmed/zosmed/libs/workflow"
+	"github.com/zosmed/zosmed/libs/workflow/nodes"
 )
 
 // ── fake Sender ───────────────────────────────────────────────────────────────
@@ -93,12 +94,13 @@ func buildE2EEngine(t *testing.T, db *stubDB, waPhone string) (*workflow.Engine,
 }
 
 // buildE2EEngineWithOutbound is buildE2EEngine plus an injectable outbound-retry
-// enqueue func (MAJOR-2) so tests can assert Queue re-enqueues the private reply.
-func buildE2EEngineWithOutbound(t *testing.T, db *stubDB, waPhone string, enqueueOutbound seller.EnqueueOutboundFunc) (*workflow.Engine, *seller.ReservationService) {
+// enqueue func (ADR-007 §2.1 point 4) so tests can assert Queue re-enqueues
+// the private reply.
+func buildE2EEngineWithOutbound(t *testing.T, db *stubDB, waPhone string, enqueueDeferred nodes.EnqueueDeferredFunc) (*workflow.Engine, *seller.ReservationService) {
 	t.Helper()
 	svc := seller.NewReservationService(db, noopEnqueue)
 	reg := workflow.NewRegistry()
-	seller.RegisterNodes(reg, svc, waPhone, enqueueOutbound)
+	seller.RegisterNodes(reg, svc, waPhone, enqueueDeferred)
 	def := workflow.WorkflowDef{
 		ID:          "comment-to-order",
 		TriggerKeys: []string{seller.NodeKeyCommentTrigger},
@@ -275,10 +277,11 @@ func TestE2E_GateQueue_ReservationStaysReserved(t *testing.T) {
 	}
 }
 
-// TestE2E_GateQueue_EnqueuesOutboundRetry verifies MAJOR-2: when the gate returns
-// Queue and an enqueueOutbound func is wired, the private reply is re-queued
-// (carrying the reservation + reply context) instead of being dropped.
-func TestE2E_GateQueue_EnqueuesOutboundRetry(t *testing.T) {
+// TestE2E_GateQueue_EnqueuesDeferredOutbound verifies ADR-007 §2.1: when the
+// gate returns Queue and a nodes.EnqueueDeferredFunc is wired, the private
+// reply is re-queued as a generic deferred outbound (carrying the reservation
+// + reply context) instead of being dropped.
+func TestE2E_GateQueue_EnqueuesDeferredOutbound(t *testing.T) {
 	accountIDStr := uuidx.Format(testAccountID)
 	catalogIDStr := uuidx.Format(testCatalogPostID)
 
@@ -294,10 +297,10 @@ func TestE2E_GateQueue_EnqueuesOutboundRetry(t *testing.T) {
 		},
 	}
 
-	var captured seller.OutboundRetry
+	var captured nodes.DeferredOutbound
 	captures := 0
-	enqueue := seller.EnqueueOutboundFunc(func(_ context.Context, r seller.OutboundRetry, _ time.Duration) error {
-		captured = r
+	enqueue := nodes.EnqueueDeferredFunc(func(_ context.Context, d nodes.DeferredOutbound, _ time.Duration) error {
+		captured = d
 		captures++
 		return nil
 	})
@@ -316,8 +319,14 @@ func TestE2E_GateQueue_EnqueuesOutboundRetry(t *testing.T) {
 	if captures != 1 {
 		t.Fatalf("expected exactly 1 outbound retry enqueued, got %d", captures)
 	}
-	if captured.ReservationID == "" || captured.ReplyText == "" || captured.CommentID != event.ObjectID {
+	if captured.ReservationID == "" || captured.Text == "" || captured.ObjectID != event.ObjectID {
 		t.Errorf("enqueued retry missing context: %+v", captured)
+	}
+	if captured.Kind != "private-reply" {
+		t.Errorf("enqueued retry Kind = %q, want private-reply", captured.Kind)
+	}
+	if captured.Deadline.IsZero() {
+		t.Error("enqueued retry Deadline must be set (§4c TTL)")
 	}
 }
 

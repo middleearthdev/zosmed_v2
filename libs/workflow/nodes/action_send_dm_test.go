@@ -13,8 +13,16 @@ import (
 
 func buildSendDMAction(t *testing.T, cfg string) workflow.Action {
 	t.Helper()
+	return buildSendDMActionWithEnqueue(t, cfg, nil)
+}
+
+// buildSendDMActionWithEnqueue builds the send-dm action with a custom
+// enqueueDeferred func wired (ADR-007 §3.7), so tests can assert the
+// DecisionQueue → outbound:send retry path.
+func buildSendDMActionWithEnqueue(t *testing.T, cfg string, enqueueDeferred nodes.EnqueueDeferredFunc) workflow.Action {
+	t.Helper()
 	fmap := workflow.FactoryMap{}
-	nodes.RegisterFactories(fmap)
+	nodes.RegisterFactories(fmap, enqueueDeferred)
 	factory := fmap[nodes.NodeTypeSendDM]
 
 	built, err := factory.Build(json.RawMessage(cfg))
@@ -171,6 +179,52 @@ func TestSendDM_QueueSkipsSend(t *testing.T) {
 	}
 	if sender.dmSendCalled {
 		t.Fatal("SendDM must NOT be called when the gate returns Queue (§10)")
+	}
+}
+
+// TestSendDM_QueueEnqueuesDeferredOutbound is the ADR-007 #3 generic-retry
+// regression: on DecisionQueue, with enqueueDeferred wired, the action must
+// enqueue a DeferredOutbound with Kind=dm and a Deadline =
+// last_interaction_at + 24h (§4c messaging window).
+func TestSendDM_QueueEnqueuesDeferredOutbound(t *testing.T) {
+	var captured nodes.DeferredOutbound
+	calls := 0
+	enqueue := nodes.EnqueueDeferredFunc(func(_ context.Context, d nodes.DeferredOutbound, _ time.Duration) error {
+		captured = d
+		calls++
+		return nil
+	})
+	action := buildSendDMActionWithEnqueue(t, `{}`, enqueue)
+
+	gater := &recordingGater{decision: workflow.Decision{Action: workflow.DecisionQueue, Reason: "overflow"}}
+	sender := &recordingSender{}
+	last := time.Now().Add(-2 * time.Hour)
+	rc := workflow.NewRunContext(workflow.Event{
+		Source:    workflow.SourceDM,
+		AccountID: "acc-1",
+		ObjectID:  "msg-q1",
+		FromID:    "user-1",
+		Raw:       map[string]any{"ig_user_id": "biz-1", "last_interaction_at": last},
+	}, sender, gater)
+
+	if _, err := action.Execute(context.Background(), rc); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if sender.dmSendCalled {
+		t.Fatal("SendDM must NOT be called when the gate returns Queue (§10)")
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 enqueueDeferred call, got %d", calls)
+	}
+	if captured.Kind != "dm" {
+		t.Errorf("Kind = %q, want dm", captured.Kind)
+	}
+	if captured.ObjectID != "msg-q1" || captured.TriggerKey != "msg-q1" {
+		t.Errorf("ObjectID/TriggerKey = %q/%q, want msg-q1", captured.ObjectID, captured.TriggerKey)
+	}
+	wantDeadline := last.Add(nodes.MessagingWindow)
+	if !captured.Deadline.Equal(wantDeadline) {
+		t.Errorf("Deadline = %v, want last_interaction_at+24h = %v", captured.Deadline, wantDeadline)
 	}
 }
 

@@ -16,8 +16,9 @@ import (
 	"github.com/zosmed/zosmed/libs/workflow"
 )
 
-// outboundStore reads the account (token) and reservation (status guard) for a
-// retry. *dbgen.Queries satisfies it.
+// outboundStore reads the account (token) for a retry, and the reservation
+// (status guard) when the retry is reservation-coupled (seller kit).
+// *dbgen.Queries satisfies it.
 type outboundStore interface {
 	GetAccountByID(ctx context.Context, id pgtype.UUID) (dbgen.Account, error)
 	GetReservation(ctx context.Context, id pgtype.UUID) (dbgen.Reservation, error)
@@ -29,20 +30,30 @@ type waitingPayMarker interface {
 	MarkWaitingPay(ctx context.Context, reservationID string) error
 }
 
-// PrivateReplySender sends the private reply. *igapi.Client satisfies it; a fake
-// is used in tests. Exported so the SenderFactory can be named from main.
-type PrivateReplySender interface {
-	SendPrivateReply(ctx context.Context, igUserID, objectID, text string) error
+// OutboundSender sends an outbound IG message by Kind (ADR-007 §3.6) — the
+// same 3-method contract as workflow.Sender. *igapi.Client satisfies it; a
+// fake is used in tests. Exported (as an interface, via SenderFactory) so
+// apps/worker/cmd/worker/main.go can wire it without this package importing
+// igapi directly in the interface declaration.
+type OutboundSender interface {
+	ReplyToComment(ctx context.Context, commentID, text string) error
+	SendPrivateReply(ctx context.Context, igUserID, commentID, text string) error
+	SendDM(ctx context.Context, igUserID, targetUserID, text string) error
 }
 
-// SenderFactory builds a PrivateReplySender from a per-account token (ADR-002
+// SenderFactory builds an OutboundSender from a per-account token (ADR-002
 // §6.2 — token looked up per task, never held statically).
-type SenderFactory func(token string) PrivateReplySender
+type SenderFactory func(token string) OutboundSender
 
-// OutboundSendHandler handles the "outbound:send" task (MAJOR-2): a retry for a
-// private reply the safety gate previously deferred (Queue). The reservation was
-// already created; this only re-attempts the private-reply step (idempotent —
-// never re-reserves). Every attempt re-passes through the safety gate (§10 one-door).
+// OutboundSendHandler handles the "outbound:send" task (ADR-007 §3/§3.6): a
+// single, Kind-aware, segment-neutral retry for ANY outbound IG message the
+// safety gate previously deferred (workflow.DecisionQueue) — private-reply,
+// dm, or comment-reply alike. This absorbs the former seller-only handler
+// (MAJOR-2): reservation coupling (seller kit) is now OPTIONAL, active only
+// when the payload carries a non-empty ReservationID, so a deployment without
+// the seller kit wired (a purely neutral workflow) stays correct. Every
+// attempt re-passes through the safety gate (§10 one-door) before any igapi
+// call, and is dropped — never sent late — once its §4c Deadline has passed.
 type OutboundSendHandler struct {
 	store     outboundStore
 	gate      workflow.Gater
@@ -59,9 +70,9 @@ func NewOutboundSendHandler(store outboundStore, gate workflow.Gater, marker wai
 
 // ProcessTask implements the asynq handler signature.
 //
-// Returning a non-nil error signals asynq to retry (bounded by MaxRetry set at
-// enqueue). A nil return means "done, don't retry" — used for the terminal
-// outcomes (sent, rejected, reservation no longer eligible).
+// Returning a non-nil error signals asynq to retry (bounded by MaxRetry set
+// at enqueue). A nil return means "done, don't retry" — used for every
+// terminal outcome (sent, dropped, rejected).
 func (h *OutboundSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error {
 	var p ptasks.OutboundSendPayload
 	if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -69,9 +80,21 @@ func (h *OutboundSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) er
 	}
 
 	log := h.logger.With(
-		slog.String("comment_id", p.CommentID),
+		slog.String("kind", p.Kind),
+		slog.String("object_id", p.ObjectID),
 		slog.String("reservation_id", p.ReservationID),
 	)
+
+	// §4c TTL (ADR-007 #3): a stale retry is DROPPED, never sent late. Checked
+	// before touching the account/gate/igapi — cheapest possible short-circuit.
+	deadline, err := time.Parse(time.RFC3339, p.Deadline)
+	if err != nil {
+		return fmt.Errorf("outbound_send: invalid deadline %q: %w", p.Deadline, err)
+	}
+	if time.Now().After(deadline) {
+		log.Warn("outbound_send: deadline §4c lewat — drop (bukan kirim telat)")
+		return nil
+	}
 
 	accountID, err := uuidx.Parse(p.AccountID)
 	if err != nil {
@@ -92,41 +115,52 @@ func (h *OutboundSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) er
 		return nil
 	}
 
-	// Guard: only retry while the reservation is still in `reserved`. If it has
-	// already moved to waiting-pay/terminal (a prior attempt succeeded, or it
-	// expired), do NOT send — this prevents a duplicate private reply.
-	resID, err := uuidx.Parse(p.ReservationID)
-	if err != nil {
-		return fmt.Errorf("outbound_send: parse reservation_id %q: %w", p.ReservationID, err)
-	}
-	res, err := h.store.GetReservation(ctx, resID)
-	if err != nil {
-		if isNoRows(err) {
-			log.Warn("outbound_send: reservation gone — drop")
+	// Reservation coupling is OPTIONAL — only the seller kit's private-reply
+	// path sets ReservationID (ADR-007 §2.1 point 4). Guard: only retry while
+	// the reservation is still `reserved`; if a prior attempt already
+	// succeeded (or it expired), do NOT send — prevents a duplicate private
+	// reply. Absent entirely for every neutral node's deferred outbound.
+	if p.ReservationID != "" {
+		resID, err := uuidx.Parse(p.ReservationID)
+		if err != nil {
+			return fmt.Errorf("outbound_send: parse reservation_id %q: %w", p.ReservationID, err)
+		}
+		res, err := h.store.GetReservation(ctx, resID)
+		if err != nil {
+			if isNoRows(err) {
+				log.Warn("outbound_send: reservation gone — drop")
+				return nil
+			}
+			return fmt.Errorf("outbound_send: get reservation: %w", err)
+		}
+		if res.Status != dbgen.ReservationStatusReserved {
+			log.Info("outbound_send: reservation no longer reserved — skip",
+				slog.String("status", string(res.Status)))
 			return nil
 		}
-		return fmt.Errorf("outbound_send: get reservation: %w", err)
-	}
-	if res.Status != dbgen.ReservationStatusReserved {
-		log.Info("outbound_send: reservation no longer reserved — skip",
-			slog.String("status", string(res.Status)))
-		return nil
 	}
 
-	// Re-check the safety gate (one-door §10) before any igapi call.
-	// A missing/corrupt timestamp would leave commentAt zero, which the gate
-	// treats as "window unenforceable → allow" (window.go) — i.e. fail-OPEN past
-	// the §4c 7-day private-reply window. Refuse instead of sending blind.
+	// Re-check the safety gate (one-door §10) before any igapi call. A
+	// missing/corrupt timestamp would leave commentAt zero, which the gate
+	// treats as "window unenforceable → allow" (window.go) — i.e. fail-OPEN
+	// past the §4c 7-day/24h window. Refuse instead of sending blind: a parse
+	// failure is a retryable error; an explicit zero (the RFC3339 zero value
+	// parses fine) is dropped for the window-bound kinds. comment-reply has no
+	// hard §4c window — its Deadline TTL above already bounds it.
 	commentAt, err := time.Parse(time.RFC3339, p.CommentAt)
 	if err != nil {
 		return fmt.Errorf("outbound_send: invalid comment_at %q: %w", p.CommentAt, err)
 	}
+	if commentAt.IsZero() && p.Kind != "comment-reply" {
+		log.Warn("outbound_send: comment_at kosong untuk kind ber-window §4c — drop (tolak fail-open)")
+		return nil
+	}
 	d, err := h.gate.Allow(ctx, workflow.OutboundReq{
 		AccountID:    p.AccountID,
-		Kind:         "private-reply",
+		Kind:         p.Kind,
 		TargetUserID: p.TargetUserID,
 		TriggerKey:   p.TriggerKey,
-		CommentID:    p.CommentID,
+		CommentID:    p.ObjectID,
 		CommentAt:    commentAt,
 		PostID:       p.PostID,
 	})
@@ -136,14 +170,16 @@ func (h *OutboundSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) er
 
 	switch d.Action {
 	case workflow.DecisionAllow:
-		if err := h.newSender(account.AccessToken).SendPrivateReply(ctx, p.IgUserID, p.CommentID, p.ReplyText); err != nil {
+		if err := sendByKind(ctx, h.newSender(account.AccessToken), p); err != nil {
 			return fmt.Errorf("outbound_send: send: %w", err)
 		}
-		if err := h.marker.MarkWaitingPay(ctx, p.ReservationID); err != nil {
-			// Reply was sent; the transition is non-fatal (reconcile/expire cope).
-			log.Warn("outbound_send: sent but MarkWaitingPay failed", slog.String("error", err.Error()))
+		if p.ReservationID != "" && h.marker != nil {
+			if err := h.marker.MarkWaitingPay(ctx, p.ReservationID); err != nil {
+				// Reply was sent; the transition is non-fatal (reconcile/expire cope).
+				log.Warn("outbound_send: sent but MarkWaitingPay failed", slog.String("error", err.Error()))
+			}
 		}
-		log.Info("outbound_send: deferred private reply sent; status=waiting-pay")
+		log.Info("outbound_send: deferred outbound sent")
 		return nil
 
 	case workflow.DecisionQueue:
@@ -152,8 +188,26 @@ func (h *OutboundSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) er
 		return fmt.Errorf("outbound_send: gate=queue (%s); retry", d.Reason)
 
 	default: // DecisionReject
-		// Window closed / kill-switch / dedupe — give up; reservation expires.
+		// Window closed / dedupe / kill-switch — give up; no further retry.
 		log.Warn("outbound_send: gate reject — drop", slog.String("reason", d.Reason))
 		return nil
+	}
+}
+
+// sendByKind dispatches to the OutboundSender method matching p.Kind
+// (ADR-007 §3.6). Kind always originates from this codebase's own enqueue
+// closures (libs/workflow/nodes, libs/kits/seller) — never external input —
+// so an unrecognised value is a programming error, surfaced as a retryable
+// error rather than silently dropped.
+func sendByKind(ctx context.Context, sender OutboundSender, p ptasks.OutboundSendPayload) error {
+	switch p.Kind {
+	case "comment-reply":
+		return sender.ReplyToComment(ctx, p.ObjectID, p.Text)
+	case "private-reply":
+		return sender.SendPrivateReply(ctx, p.IgUserID, p.ObjectID, p.Text)
+	case "dm":
+		return sender.SendDM(ctx, p.IgUserID, p.TargetUserID, p.Text)
+	default:
+		return fmt.Errorf("outbound_send: unknown kind %q", p.Kind)
 	}
 }

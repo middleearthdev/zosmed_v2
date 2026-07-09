@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/zosmed/zosmed/libs/workflow"
+	"github.com/zosmed/zosmed/libs/workflow/nodes"
 )
 
 // node_type identifiers for the seller kit, as they appear in the feasible
@@ -67,9 +68,9 @@ func (a *reserveAndReplyAction) Execute(ctx context.Context, rc *workflow.RunCon
 // RegisterFactories adds the seller-kit node_types to fmap so the compiler
 // (libs/workflow/compile.go) can build per-workflow instances keyed by node
 // UUID (ADR-004 §1/§6.1 B5). Config is unused per node — svc/waPhone/
-// enqueueOutbound are bound once at startup and shared by every instance,
+// enqueueDeferred are bound once at startup and shared by every instance,
 // same as RegisterNodes (§12a-1 DRY via the shared constructors in kit.go).
-func RegisterFactories(fmap workflow.FactoryMap, svc *ReservationService, waPhone string, enqueueOutbound EnqueueOutboundFunc) {
+func RegisterFactories(fmap workflow.FactoryMap, svc *ReservationService, waPhone string, enqueueDeferred nodes.EnqueueDeferredFunc) {
 	fmap[nodeTypeCommentToOrder] = workflow.Factory{
 		Category: workflow.KindTrigger,
 		Build: func(_ json.RawMessage) (any, error) {
@@ -83,7 +84,7 @@ func RegisterFactories(fmap workflow.FactoryMap, svc *ReservationService, waPhon
 		Build: func(_ json.RawMessage) (any, error) {
 			return &reserveAndReplyAction{
 				reserve: newReserveAction(svc, waPhone),
-				reply:   newPrivateReplyAction(svc, enqueueOutbound),
+				reply:   newPrivateReplyAction(svc, enqueueDeferred),
 			}, nil
 		},
 	}

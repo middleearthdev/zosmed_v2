@@ -12,7 +12,7 @@ import (
 func buildKeywordFilter(t *testing.T, cfg string) workflow.Filter {
 	t.Helper()
 	fmap := workflow.FactoryMap{}
-	nodes.RegisterFactories(fmap)
+	nodes.RegisterFactories(fmap, nil)
 	factory := fmap[nodes.NodeTypeKeywordMatch]
 
 	built, err := factory.Build(json.RawMessage(cfg))

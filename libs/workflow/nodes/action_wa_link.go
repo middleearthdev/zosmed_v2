@@ -29,6 +29,14 @@ const (
 // Bahasa Indonesia). Placeholders: {nama}, {wa_link}.
 const defaultWaLinkTemplate = "Halo kak {nama}! Yuk lanjut ngobrol di WhatsApp ya: {wa_link}"
 
+// waLinkKind identifies this action's outbound kind to the safety gate: a
+// PRIVATE reply DELIVERED as a DM (POST /{ig-id}/messages, recipient
+// {comment_id}), so it counts against the DM caps (§4c: 200/hr→Queue,
+// 1000/day) plus the ≤7-day window — same Kind as seller.privateReplyAction.
+// Duplicated as a literal (not imported from libs/safety) — MUST stay
+// identical to safety.KindPrivateReply / seller's "private-reply" literal.
+const waLinkKind = "private-reply"
+
 // sendWhatsAppLinkConfig is the config shape for NodeTypeSendWhatsAppLink.
 type sendWhatsAppLinkConfig struct {
 	Phone    string `json:"phone"`              // E.164 without '+', e.g. "6281234567890"
@@ -41,33 +49,41 @@ type sendWhatsAppLinkConfig struct {
 type sendWhatsAppLinkAction struct {
 	phone    string
 	template string
+
+	// enqueueDeferred schedules an outbound:send retry when the gate returns
+	// DecisionQueue (ADR-007 §2.1); nil falls back to report-only.
+	enqueueDeferred EnqueueDeferredFunc
 }
 
-// BuildSendWhatsAppLink is the Factory.Build func for NodeTypeSendWhatsAppLink.
-func BuildSendWhatsAppLink(cfg json.RawMessage) (any, error) {
-	var c sendWhatsAppLinkConfig
-	if len(cfg) > 0 {
-		if err := json.Unmarshal(cfg, &c); err != nil {
-			return nil, fmt.Errorf("nodes: send-whatsapp-link: parse config: %w", err)
+// newSendWhatsAppLinkFactory returns the Factory.Build func for
+// NodeTypeSendWhatsAppLink, binding enqueueDeferred (ADR-007 §3.7) into every
+// built instance.
+func newSendWhatsAppLinkFactory(enqueueDeferred EnqueueDeferredFunc) func(json.RawMessage) (any, error) {
+	return func(cfg json.RawMessage) (any, error) {
+		var c sendWhatsAppLinkConfig
+		if len(cfg) > 0 {
+			if err := json.Unmarshal(cfg, &c); err != nil {
+				return nil, fmt.Errorf("nodes: send-whatsapp-link: parse config: %w", err)
+			}
 		}
+		if strings.TrimSpace(c.Phone) == "" {
+			return nil, fmt.Errorf("nodes: send-whatsapp-link: config.phone is required")
+		}
+		tmpl := c.Template
+		if strings.TrimSpace(tmpl) == "" {
+			tmpl = defaultWaLinkTemplate
+		}
+		return &sendWhatsAppLinkAction{phone: c.Phone, template: tmpl, enqueueDeferred: enqueueDeferred}, nil
 	}
-	if strings.TrimSpace(c.Phone) == "" {
-		return nil, fmt.Errorf("nodes: send-whatsapp-link: config.phone is required")
-	}
-	tmpl := c.Template
-	if strings.TrimSpace(tmpl) == "" {
-		tmpl = defaultWaLinkTemplate
-	}
-	return &sendWhatsAppLinkAction{phone: c.Phone, template: tmpl}, nil
 }
 
 // Execute sends the private reply. Guardrail (§10 one-door): rc.Gate.Allow is
 // called BEFORE rc.Sender is ever touched. Decision handling mirrors
 // seller.privateReplyAction exactly:
 //   - Allow  -> send via rc.Sender.SendPrivateReply
-//   - Queue  -> deferred, reported only (no reservation state to hold here,
-//     unlike the seller kit — TODO(ADR-004 roadmap): wire a generic
-//     outbound-retry task once one exists, mirroring seller.EnqueueOutboundFunc)
+//   - Queue  -> enqueue a generic outbound:send retry (ADR-007 #3), or report
+//     deferred only if enqueueDeferred is nil (no reservation state to hold
+//     here, unlike the seller kit)
 //   - Reject -> skipped, reported only
 func (a *sendWhatsAppLinkAction) Execute(ctx context.Context, rc *workflow.RunContext) (workflow.ActionResult, error) {
 	nama := rc.Event.FromUsername
@@ -75,14 +91,15 @@ func (a *sendWhatsAppLinkAction) Execute(ctx context.Context, rc *workflow.RunCo
 
 	waLink := buildWaMeLink(a.phone, nama)
 	replyText := strings.NewReplacer("{nama}", nama, "{wa_link}", waLink).Replace(a.template)
+	commentAt := rawTime(rc.Event.Raw, rawKeyCommentAt)
 
 	req := workflow.OutboundReq{
 		AccountID:    rc.Event.AccountID,
-		Kind:         "private-reply",
+		Kind:         waLinkKind,
 		TargetUserID: rc.Event.FromID,
 		TriggerKey:   rc.Event.ObjectID,
 		CommentID:    rc.Event.ObjectID,
-		CommentAt:    rawTime(rc.Event.Raw, rawKeyCommentAt),
+		CommentAt:    commentAt,
 		PostID:       rc.Event.MediaID,
 	}
 
@@ -100,8 +117,29 @@ func (a *sendWhatsAppLinkAction) Execute(ctx context.Context, rc *workflow.RunCo
 		return workflow.ActionResult{Detail: "private reply dengan link WhatsApp terkirim"}, nil
 
 	case workflow.DecisionQueue:
+		// §10 overflow → antre, bukan ditolak (ADR-007 #3).
+		if a.enqueueDeferred == nil {
+			return workflow.ActionResult{
+				Detail: fmt.Sprintf("gate=queue (%s); outbound ditunda (belum ada retry generik)", d.Reason),
+			}, nil
+		}
+		def := DeferredOutbound{
+			AccountID:    rc.Event.AccountID,
+			Kind:         waLinkKind,
+			IgUserID:     igUserID,
+			TargetUserID: rc.Event.FromID,
+			ObjectID:     rc.Event.ObjectID,
+			Text:         replyText,
+			CommentAt:    commentAt,
+			PostID:       rc.Event.MediaID,
+			TriggerKey:   rc.Event.ObjectID,
+			Deadline:     DeadlineFrom(commentAt, PrivateReplyWindow), // §4c: 7 days from the comment
+		}
+		if err := a.enqueueDeferred(ctx, def, DeferredRetryDelay); err != nil {
+			return workflow.ActionResult{}, fmt.Errorf("nodes: send-whatsapp-link: enqueue deferred: %w", err)
+		}
 		return workflow.ActionResult{
-			Detail: fmt.Sprintf("gate=queue (%s); outbound ditunda (belum ada retry generik)", d.Reason),
+			Detail: fmt.Sprintf("gate=queue (%s); outbound diantre untuk retry", d.Reason),
 		}, nil
 
 	default: // DecisionReject

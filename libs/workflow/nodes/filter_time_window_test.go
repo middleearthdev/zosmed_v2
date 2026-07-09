@@ -14,7 +14,7 @@ import (
 func buildTimeWindowFilter(t *testing.T, cfg string) (workflow.Filter, error) {
 	t.Helper()
 	fmap := workflow.FactoryMap{}
-	nodes.RegisterFactories(fmap)
+	nodes.RegisterFactories(fmap, nil)
 	built, err := fmap[nodes.NodeTypeTimeWindow].Build(json.RawMessage(cfg))
 	if err != nil {
 		return nil, err

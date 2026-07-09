@@ -3,6 +3,13 @@
 -- lost-update races when multiple workers process the same reservation concurrently.
 
 -- name: CreateReservation :one
+-- Idempotent insert (ADR-007 §2.3b, #6b): ON CONFLICT (account_id, ig_comment_id)
+-- DO NOTHING means a re-run (asynq retry) for a keep/C comment already reserved
+-- returns ZERO rows -> pgx surfaces this as pgx.ErrNoRows ("no rows in result
+-- set") from the :one QueryRow+Scan, exactly like GetProductByPostAndCode's
+-- no-match case. Caller (libs/kits/seller ReservationService.Reserve) MUST
+-- check isNoRows(err) and, on conflict, call GetReservationByComment to fetch
+-- the existing reservation instead of treating this as a hard failure.
 INSERT INTO reservation (
     account_id,
     catalog_post_id,
@@ -26,10 +33,18 @@ INSERT INTO reservation (
     @expires_at,
     @wa_link
 )
+ON CONFLICT (account_id, ig_comment_id) DO NOTHING
 RETURNING *;
 
 -- name: GetReservation :one
 SELECT * FROM reservation WHERE id = @id;
+
+-- name: GetReservationByComment :one
+-- Fetch the existing reservation for (account_id, ig_comment_id) when
+-- CreateReservation hits the ON CONFLICT DO NOTHING branch above (ADR-007 #6b).
+SELECT * FROM reservation
+WHERE account_id = @account_id
+  AND ig_comment_id = @ig_comment_id;
 
 -- name: UpdateReservationStatus :one
 -- Race guard: only transitions from the expected non-terminal state succeed.

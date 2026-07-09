@@ -58,8 +58,16 @@ func (s *recordingSender) SendDM(_ context.Context, igUserID, targetUserID, text
 
 func buildWaLinkAction(t *testing.T, cfg string) workflow.Action {
 	t.Helper()
+	return buildWaLinkActionWithEnqueue(t, cfg, nil)
+}
+
+// buildWaLinkActionWithEnqueue builds the send-whatsapp-link action with a
+// custom enqueueDeferred func wired (ADR-007 §3.7), so tests can assert the
+// DecisionQueue → outbound:send retry path.
+func buildWaLinkActionWithEnqueue(t *testing.T, cfg string, enqueueDeferred nodes.EnqueueDeferredFunc) workflow.Action {
+	t.Helper()
 	fmap := workflow.FactoryMap{}
-	nodes.RegisterFactories(fmap)
+	nodes.RegisterFactories(fmap, enqueueDeferred)
 	factory := fmap[nodes.NodeTypeSendWhatsAppLink]
 
 	built, err := factory.Build(json.RawMessage(cfg))
@@ -140,9 +148,61 @@ func TestSendWhatsAppLink_QueueSkipsSend(t *testing.T) {
 	}
 }
 
+// TestSendWhatsAppLink_QueueEnqueuesDeferredOutbound is the ADR-007 #3
+// generic-retry regression: on DecisionQueue, with enqueueDeferred wired, the
+// action must enqueue a DeferredOutbound with Kind=private-reply and a
+// Deadline = CommentAt + 7 days (§4c) instead of silently dropping the
+// message.
+func TestSendWhatsAppLink_QueueEnqueuesDeferredOutbound(t *testing.T) {
+	var captured nodes.DeferredOutbound
+	calls := 0
+	enqueue := nodes.EnqueueDeferredFunc(func(_ context.Context, d nodes.DeferredOutbound, _ time.Duration) error {
+		captured = d
+		calls++
+		return nil
+	})
+	action := buildWaLinkActionWithEnqueue(t, `{"phone":"6281234567890"}`, enqueue)
+
+	gater := &recordingGater{decision: workflow.Decision{Action: workflow.DecisionQueue, Reason: "overflow"}}
+	sender := &recordingSender{}
+	commentAt := time.Now().Add(-1 * time.Hour)
+	rc := workflow.NewRunContext(workflow.Event{
+		Source:       workflow.SourceComment,
+		AccountID:    "acc-1",
+		ObjectID:     "comment-q1",
+		MediaID:      "media-1",
+		FromID:       "user-1",
+		FromUsername: "rina",
+		Raw:          map[string]any{"ig_user_id": "biz-1", "comment_at": commentAt},
+	}, sender, gater)
+
+	if _, err := action.Execute(context.Background(), rc); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if sender.sendCalled {
+		t.Fatal("SendPrivateReply must NOT be called when the gate returns Queue (§10)")
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 enqueueDeferred call, got %d", calls)
+	}
+	if captured.Kind != "private-reply" {
+		t.Errorf("Kind = %q, want private-reply", captured.Kind)
+	}
+	if captured.ObjectID != "comment-q1" || captured.TriggerKey != "comment-q1" {
+		t.Errorf("ObjectID/TriggerKey = %q/%q, want comment-q1", captured.ObjectID, captured.TriggerKey)
+	}
+	wantDeadline := commentAt.Add(nodes.PrivateReplyWindow)
+	if !captured.Deadline.Equal(wantDeadline) {
+		t.Errorf("Deadline = %v, want CommentAt+7d = %v", captured.Deadline, wantDeadline)
+	}
+	if !strings.Contains(captured.Text, "wa.me/6281234567890") {
+		t.Errorf("captured Text = %q, want it to contain the wa.me link", captured.Text)
+	}
+}
+
 func TestSendWhatsAppLink_MissingPhoneRejectedAtBuild(t *testing.T) {
 	fmap := workflow.FactoryMap{}
-	nodes.RegisterFactories(fmap)
+	nodes.RegisterFactories(fmap, nil)
 	factory := fmap[nodes.NodeTypeSendWhatsAppLink]
 
 	if _, err := factory.Build(json.RawMessage(`{}`)); err == nil {
