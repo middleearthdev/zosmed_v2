@@ -8,7 +8,7 @@ import { LoginForm } from './LoginForm';
 export const metadata: Metadata = { title: 'Masuk — Zosmed' };
 
 export default async function LoginPage() {
-  // Validated bounce (not middleware): only a genuinely valid session goes to the
+  // Validated bounce (not proxy.ts): only a genuinely valid session goes to the
   // app. A present-but-invalid cookie falls through and renders the form — no loop.
   const me = await getMe();
   if (me) redirect(me.user.onboardingCompleted ? '/dashboard' : '/onboarding');

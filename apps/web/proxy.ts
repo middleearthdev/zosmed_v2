@@ -2,12 +2,13 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 /**
- * Coarse route guard (ADR-003 §5.3, AC-10). Runs on the edge WITHOUT backend
- * access, so it can only make the "negative" claim: *no cookie → definitely not
- * logged in → send to /login*. It must NOT make the "positive" claim (*cookie
- * present → logged in*), because a present-but-invalid cookie (tampered, expired,
- * or revoked) can't be detected here — doing so would fight the validated guard
- * in `(app)/layout.tsx` and cause an infinite redirect loop (ERR_TOO_MANY_REDIRECTS).
+ * Coarse route guard (ADR-003 §5.3, AC-10). Runs in the `nodejs` runtime
+ * (Next.js 16 `proxy.ts`, NOT edge) WITHOUT backend access, so it can only make
+ * the "negative" claim: *no cookie → definitely not logged in → send to /login*.
+ * It must NOT make the "positive" claim (*cookie present → logged in*), because
+ * a present-but-invalid cookie (tampered, expired, or revoked) can't be detected
+ * here — doing so would fight the validated guard in `(app)/layout.tsx` and cause
+ * an infinite redirect loop (ERR_TOO_MANY_REDIRECTS).
  *
  * The authoritative check (session actually valid, onboarding complete, and
  * bouncing an already-logged-in user away from /login) lives server-side in
@@ -34,7 +35,7 @@ const PROTECTED_PATHS = [
   '/onboarding',
 ];
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const hasSession = request.cookies.has(SESSION_COOKIE);
   const { pathname } = request.nextUrl;
 

@@ -37,7 +37,7 @@ Enam keputusan mengikat:
 - [ ] **AC-7** `PUT /api/v1/onboarding/segment` menyimpan `app_user.segment` (validasi enum `seller|creator|booking`); `POST /api/v1/onboarding/complete` menolak (`409 onboarding_incomplete`) bila segmen kosong atau account belum `connected`, dan men-stamp `onboarding_completed_at` bila lengkap.
 - [ ] **AC-8** `GET /api/v1/auth/me` mengembalikan `{user:{id,email,segment,onboardingCompleted}, account:{status,handle,displayName}|null}` — **tanpa** `password_hash`/`access_token`.
 - [ ] **AC-9** `GET /connect/instagram` di belakang `RequireUser`; `user_id` di-embed ke signed state (`connect/state.go`) dan diekstrak di `Callback` → `UpsertAccountFromOAuth` menyimpan `user_id`. Callback tetap publik.
-- [ ] **AC-10** FE: `middleware.ts` redirect ke `/login` untuk path terproteksi tanpa cookie sesi; `(app)/layout.tsx` fetch `/auth/me` → `/login` bila 401, `/onboarding` bila `onboardingCompleted=false`, render bila lengkap. Path `/login`+cookie valid → redirect `/dashboard`.
+- [ ] **AC-10** FE: `middleware.ts` (kini `proxy.ts`, ADR-008) redirect ke `/login` untuk path terproteksi tanpa cookie sesi; `(app)/layout.tsx` fetch `/auth/me` → `/login` bila 401, `/onboarding` bila `onboardingCompleted=false`, render bila lengkap. Path `/login`+cookie valid → redirect `/dashboard`.
 - [ ] **AC-11** FE Onboarding terwire: pilih segmen → `PUT /onboarding/segment`; tombol "Hubungkan Instagram" → `/connect/instagram` (real, ADR-002); status akun dari `/auth/me` (bukan `mockAccount`); tombol selesai → `/onboarding/complete` → redirect `/dashboard`. Copy Bahasa Indonesia (§11/§12).
 - [ ] **AC-12** `next.config` rewrites mem-proxy `/api/*` & `/connect/*` ke API base; cookie sesi first-party. Tidak ada `SameSite=None` di kode.
 - [ ] **AC-13** `go run ./apps/api/cmd/seed` (dari root) idempotent membuat user demo + account demo (connected, token dummy, tertaut user) + catalog/product; menjalankan dua kali tidak menduplikasi/eror. Token dummy bukan kredensial asli.
@@ -306,7 +306,7 @@ Isi:
 
 ### 8.1 File-per-file
 - **`next.config.(ts|mjs)`** (MODIF) — `rewrites()`: `{source:'/api/:path*', destination: '${API_BASE}/api/:path*'}` dan `{source:'/connect/:path*', destination:'${API_BASE}/connect/:path*'}`. Menjadikan cookie first-party (AC-12).
-- **`middleware.ts`** (BARU) — cek cookie `zsid` untuk path terproteksi (`/dashboard`,`/workflows`,`/inbox`,... dan `/onboarding`) → tanpa cookie redirect `/login`. Path `/login`,`/register` + cookie ada → redirect `/dashboard`. (Coarse; verifikasi halus di layout.)
+- **`middleware.ts`** (BARU) — cek cookie `zsid` untuk path terproteksi (`/dashboard`,`/workflows`,`/inbox`,... dan `/onboarding`) → tanpa cookie redirect `/login`. Path `/login`,`/register` + cookie ada → redirect `/dashboard`. (Coarse; verifikasi halus di layout.) _(Next 16 / ADR-008: file ini kini bernama **`proxy.ts`** dengan export `proxy`; `config.matcher` & logika guard identik.)_
 - **`lib/auth.ts`** (BARU) — server helper `getMe()` (fetch `/api/v1/auth/me`, **forward cookie** via `next/headers cookies()` di server component) mengembalikan `MeResponse|null`; client actions `login/register/logout/saveSegment/completeOnboarding` (fetch `credentials:'include'`).
 - **`app/login/page.tsx`** + **`app/login/LoginForm.tsx`** (BARU) — form email+password (client), pakai design token §11 (dark+lime), copy ID. Sukses → `router.push` sesuai `onboardingCompleted`.
 - **`app/register/page.tsx`** + form (BARU, opsional bila register diaktifkan).
@@ -355,7 +355,7 @@ Yang **tidak** berubah: `libs/workflow`, `libs/safety`, `libs/igapi`, `libs/kits
 7. `apps/api/cmd/seed/main.go` (user+account+catalog demo, idempotent, tolak prod). Bergantung: 3 (hashing) + query. — go-backend-engineer
 
 **Fase E — Frontend (setelah B4 kontrak final):**
-8. `next.config` rewrites + `middleware.ts` + `lib/auth.ts`. — frontend-ui-engineer
+8. `next.config` rewrites + `middleware.ts` (kini `proxy.ts`, ADR-008) + `lib/auth.ts`. — frontend-ui-engineer
 9. `app/login` (+register opsional). Bergantung: 8. — frontend-ui-engineer
 10. `app/onboarding` rewire (`OnboardingClient`) + `(app)/layout.tsx` guard + `lib/mock/api.ts` getAccount real. Bergantung: 8, 2. — frontend-ui-engineer
 
@@ -403,7 +403,7 @@ Jalur kritis: A1 → B(3,4,5) → C6. FE (E) menunggu kontrak B4 final. Seed (D)
 - **Jangan pernah** kirim `dbgen.AppUser`/`dbgen.Account` mentah ke JSON — petakan ke DTO aman (buang `password_hash`/`access_token`). Ini AC-1/AC-8; grep saat review.
 - **Jangan log** password/token. Login gagal cukup log email + "invalid_credentials", bukan password.
 - `RequireUser` di-inject ke router sebagai fungsi (hindari import cycle `httpx`↔`auth`), pola sama seperti handler lain sudah `http.HandlerFunc`.
-- Cookie: `HttpOnly` wajib, `Secure` mengikuti `APP_ENV`, `SameSite=Lax`, `Path=/`, `Max-Age`=TTL. Nama `zsid` sebagai konstanta (dipakai session.go + middleware.ts — dokumentasikan agar konsisten).
+- Cookie: `HttpOnly` wajib, `Secure` mengikuti `APP_ENV`, `SameSite=Lax`, `Path=/`, `Max-Age`=TTL. Nama `zsid` sebagai konstanta (dipakai session.go + `proxy.ts` FE, dulu `middleware.ts` pra-ADR-008 — dokumentasikan agar konsisten).
 - Server component FE **wajib forward cookie** ke `/auth/me` (`cookies()` dari `next/headers`), kalau tidak sesi tak terbaca di SSR.
 - Setelah selesai: `grep -rn "AuthStub" apps/` = 0; `grep -rn "password_hash\|access_token" apps/web packages` = 0; `go run ./apps/api/cmd/seed` dua kali tanpa eror.
 - Tidak menyentuh `libs/igapi`/engine (§4/§8). Ini murni identitas internal.

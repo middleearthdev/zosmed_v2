@@ -15,7 +15,9 @@ Panduan menjalankan stack dev: **API** (`apps/api`), **Worker** (`apps/worker`),
 | **Go** (workspace `go.work`) | sudah ada di repo | API, Worker, Seed |
 | **goose** (migrasi DB) | `go install github.com/pressly/goose/v3/cmd/goose@latest` | Migrasi |
 | **bun** (deps + dev server FE) | `curl -fsSL https://bun.sh/install \| bash` | Web |
+| **Node.js ≥ 20.9** (runtime Next 16) | `nvm use` di `apps/web` (baca `.nvmrc`) — atau install manual | Web (`next dev`/`build`; Node 18 tidak didukung Next 16, ADR-008) |
 
+> `apps/web` memakai **Next.js 16** (Turbopack default). Minimum Node.js **20.9** ditegakkan lewat `apps/web/package.json` `engines` + `apps/web/.nvmrc`; lihat ADR-008 (`docs/specs/nextjs-16-upgrade.md`).
 > Tidak ada `docker-compose`/`Makefile` — Postgres & Redis kamu jalankan sendiri.
 
 ---

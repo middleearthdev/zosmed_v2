@@ -30,15 +30,21 @@ export function Sidebar({ account }: { account: Account }) {
   const [collapsed, setCollapsed] = useState(false);
 
   // Restore persisted preference after hydration (avoids SSR mismatch).
+  // Reading localStorage must happen post-mount, so this intentionally
+  // sets state from an effect rather than a lazy initializer.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setUserPref(localStorage.getItem(COLLAPSE_KEY) === '1');
   }, []);
 
   // Route-driven: force-collapse on the builder, otherwise follow user pref.
   // Deps are booleans, so this only re-runs when entering/leaving the builder
   // or when the stored pref loads — a manual toggle while on the builder is
-  // therefore preserved until the route changes.
+  // therefore preserved until the route changes. Kept as its own state (not a
+  // computed value) so `toggle()` can flip `collapsed` independently while on
+  // the builder route without touching the persisted `userPref`.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCollapsed(isBuilder ? true : userPref);
   }, [isBuilder, userPref]);
 

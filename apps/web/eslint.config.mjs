@@ -1,13 +1,16 @@
-import { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { FlatCompat } from '@eslint/eslintrc';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const compat = new FlatCompat({ baseDirectory: __dirname });
+// eslint-config-next@16 ships native flat-config arrays (Linter.Config[]) per
+// sub-path export, so we import them directly instead of routing through
+// `FlatCompat.extends('next/core-web-vitals', 'next/typescript')` — that
+// legacy bridge expects eslintrc-shaped configs and throws
+// "Converting circular structure to JSON" against the plugin objects that
+// v16's flat exports already resolve. See ADR-008 §3 deviation note.
+import nextCoreWebVitals from 'eslint-config-next/core-web-vitals';
+import nextTypescript from 'eslint-config-next/typescript';
 
 const config = [
   { ignores: ['.next/**', 'node_modules/**', 'next-env.d.ts'] },
-  ...compat.extends('next/core-web-vitals', 'next/typescript'),
+  ...nextCoreWebVitals,
+  ...nextTypescript,
 ];
 
 export default config;

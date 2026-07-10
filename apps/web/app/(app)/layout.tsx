@@ -7,7 +7,7 @@ import { AppShell } from './_components/AppShell';
 
 /**
  * Auth guard for every screen under `(app)` (ADR-003 §5.3, AC-10). Coarse
- * cookie-presence check already happened in `middleware.ts`; here we verify
+ * cookie-presence check already happened in `proxy.ts`; here we verify
  * the session is actually valid and onboarding is complete before rendering.
  */
 export default async function AppLayout({ children }: { children: ReactNode }) {
